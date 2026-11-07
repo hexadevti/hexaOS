@@ -1,15 +1,17 @@
 #!/bin/sh
-# Roda depois de montar o sistema de arquivos, antes de gerar a imagem.
+# Runs after the root filesystem is assembled, before the image is created.
 set -e
 
 BOARD_DIR=$(dirname "$0")
 
 cp -f "$BOARD_DIR/grub-efi.cfg" "$BINARIES_DIR/efi-part/EFI/BOOT/grub.cfg"
 
-# Scripts do overlay precisam ser executaveis (o Windows nao guarda essa info)
-chmod 0755 "$TARGET_DIR/usr/sbin/hexa-session" "$TARGET_DIR/etc/init.d/S00psplash"
+# Overlay scripts must be executable (Windows does not keep that bit)
+chmod 0755 "$TARGET_DIR/usr/sbin/hexa-session" "$TARGET_DIR/usr/bin/hexa-dev" \
+    "$TARGET_DIR"/etc/init.d/S00psplash "$TARGET_DIR"/etc/init.d/S01keymap "$TARGET_DIR"/etc/init.d/S02growfs
+chmod 0440 "$TARGET_DIR/etc/sudoers.d/wheel"
 
-# tty1 = sessao grafica (ou login em texto no modo "hexaos.text")
+# tty1 = graphical session (or text login in "hexaos.text" mode)
 INITTAB="$TARGET_DIR/etc/inittab"
 grep -q hexa-session "$INITTAB" || \
     sed -i '/GENERIC_SERIAL/i tty1::respawn:/usr/sbin/hexa-session' "$INITTAB"

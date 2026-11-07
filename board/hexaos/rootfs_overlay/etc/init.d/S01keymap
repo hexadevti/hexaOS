@@ -1,0 +1,5 @@
+#!/bin/sh
+# ABNT2 keyboard layout on the text consoles (Ctrl+Alt+F2)
+[ "$1" = start ] || exit 0
+loadkeys br-abnt2 >/dev/null 2>&1
+exit 0

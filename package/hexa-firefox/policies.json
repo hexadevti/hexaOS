@@ -1,0 +1,10 @@
+{
+  "policies": {
+    "DisableTelemetry": true,
+    "DisableDefaultBrowserAgent": true,
+    "DontCheckDefaultBrowser": true,
+    "OverrideFirstRunPage": "",
+    "Homepage": { "URL": "https://www.google.com/", "StartPage": "homepage" },
+    "RequestedLocales": ["en-US"]
+  }
+}

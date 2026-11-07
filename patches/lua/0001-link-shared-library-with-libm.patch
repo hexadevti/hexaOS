@@ -1,0 +1,18 @@
+Link liblua.so against its own dependencies (libm)
+
+Buildroot's shared-library rule links liblua.so without $(LIBS), so the
+library has no DT_NEEDED entry for libm. libinput (and therefore Weston)
+loads liblua for its plugin support, and glibc then aborts with
+"Relink liblua.so with libm.so.6 for IFUNC symbol sin" and a segfault.
+
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -69,7 +69,7 @@
+ 	$(RANLIB) $@
+ 
+ $(LUA_SO): $(CORE_O) $(LIB_O)
+-	$(CC) -o $@.$(PKG_VERSION) -shared -Wl,-soname="$@.$(PKG_VERSION)" $?
++	$(CC) -o $@.$(PKG_VERSION) -shared -Wl,-soname="$@.$(PKG_VERSION)" $? $(LIBS)
+ 	ln -fs $@.$(PKG_VERSION) $@
+ 
+ ifneq (dynamic,$(BUILDMODE))

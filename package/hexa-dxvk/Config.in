@@ -1,0 +1,8 @@
+config BR2_PACKAGE_HEXA_DXVK
+	bool "hexa-dxvk"
+	depends on BR2_PACKAGE_HEXA_WINE
+	help
+	  DXVK: Direct3D 8/9/10/11 on top of Vulkan, for games in Wine.
+	  Install it into a Wine prefix with the "hexa-dxvk" command.
+
+	  https://github.com/doitsujin/dxvk

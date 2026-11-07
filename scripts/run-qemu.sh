@@ -1,17 +1,17 @@
 #!/bin/bash
-# Roda o hexaOS no QEMU com firmware UEFI (OVMF), igual ao notebook real.
-# Uso (no WSL): bash scripts/run-qemu.sh            -> abre janela
-#               bash scripts/run-qemu.sh --serial   -> so terminal (sem janela)
-#               bash scripts/run-qemu.sh --keep     -> guarda as mudancas em disk-config.img
-#                                                      (para configurar e depois gravar no pendrive)
+# Runs hexaOS in QEMU with UEFI firmware (OVMF), like the real laptop.
+# Usage (in WSL): bash scripts/run-qemu.sh            -> opens a window
+#                 bash scripts/run-qemu.sh --serial   -> terminal only (no window)
+#                 bash scripts/run-qemu.sh --keep     -> keeps changes in disk-config.img
+#                                                        (configure first, then write it to a USB drive)
 set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-$HOME/hexaos-build}"
 IMG="$OUT_DIR/images/disk.img"
 OVMF=/usr/share/ovmf/OVMF.fd
 
-[ -f "$IMG" ]  || { echo "Imagem nao encontrada: $IMG (rode scripts/build.sh)"; exit 1; }
-[ -f "$OVMF" ] || { echo "OVMF nao encontrado: sudo apt install ovmf"; exit 1; }
+[ -f "$IMG" ]  || { echo "Image not found: $IMG (run scripts/build.sh)"; exit 1; }
+[ -f "$OVMF" ] || { echo "OVMF not found: sudo apt install ovmf"; exit 1; }
 
 KEEP=0; SERIAL=0
 for arg in "$@"; do
@@ -22,21 +22,21 @@ for arg in "$@"; do
 done
 
 if [ "$KEEP" = 1 ]; then
-    # Imagem persistente: criada uma vez a partir do disk.img e reaproveitada.
-    # Para recomecar do zero, apague disk-config.img.
+    # Persistent image: created once from disk.img and reused.
+    # To start over, delete disk-config.img.
     RUN_IMG="$OUT_DIR/images/disk-config.img"
     [ -f "$RUN_IMG" ] || cp "$IMG" "$RUN_IMG"
-    echo "Mudancas serao salvas em: $RUN_IMG"
+    echo "Changes will be saved to: $RUN_IMG"
 else
-    # Copia a imagem para nao alterar a original durante os testes
+    # Copy the image so tests do not modify the original
     RUN_IMG="$OUT_DIR/images/disk-run.img"
     cp "$IMG" "$RUN_IMG"
 fi
 
-# Sem KVM: emulacao pura com CPU moderna (o hexaOS exige x86-64-v2).
-# Para ficar rapido: sudo usermod -aG kvm $USER  (e reabrir o WSL)
-# -smap: o TCG do QEMU 8.x emula o iretq em modo usuario como acesso de
-# supervisor e o SMAP derruba o Wine (kernel oops). Hardware real nao tem isso.
+# Without KVM: pure emulation with a modern CPU (hexaOS requires x86-64-v2).
+# For speed: sudo usermod -aG kvm $USER  (then restart WSL)
+# -smap: QEMU 8.x TCG emulates a user-mode iretq as a supervisor access and
+# SMAP then kills Wine (kernel oops). Real hardware is not affected.
 ACCEL="-accel tcg -cpu max,-smap"
 [ -w /dev/kvm ] && ACCEL="-accel kvm -cpu host"
 

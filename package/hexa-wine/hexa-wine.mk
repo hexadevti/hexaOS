@@ -1,9 +1,9 @@
 ################################################################################
 #
-# hexa-wine: Wine 64-bit (WoW64) para o hexaOS
+# hexa-wine: 64-bit Wine (WoW64) for hexaOS
 #
-# Baseado no pacote "wine" do Buildroot, que so suporta i386. Aqui o lado Unix
-# e 64-bit e as DLLs Windows (32 e 64 bits) sao compiladas com mingw.
+# Based on Buildroot's "wine" package, which only supports i386. Here the Unix
+# side is 64-bit and the Windows DLLs (32 and 64-bit) are built with mingw.
 #
 ################################################################################
 
@@ -14,7 +14,8 @@ HEXA_WINE_LICENSE = LGPL-2.1+
 HEXA_WINE_LICENSE_FILES = COPYING.LIB LICENSE
 HEXA_WINE_DEPENDENCIES = \
 	host-bison host-flex host-wine host-pkgconf host-wayland \
-	wayland libxkbcommon freetype fontconfig alsa-lib gnutls udev
+	wayland libxkbcommon freetype fontconfig alsa-lib gnutls udev \
+	mesa3d vulkan-loader pulseaudio
 
 ifeq ($(BR2_PACKAGE_DBUS),y)
 HEXA_WINE_DEPENDENCIES += dbus
@@ -23,11 +24,11 @@ else
 HEXA_WINE_CONF_OPTS += --without-dbus
 endif
 
-# Compiladores mingw do sistema (pacote gcc-mingw-w64 do Ubuntu)
+# System mingw compilers (Ubuntu package gcc-mingw-w64)
 define HEXA_WINE_CHECK_MINGW
 	@for cc in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do \
 		command -v $$cc > /dev/null || { \
-			echo "ERRO: $$cc nao encontrado. Rode: sudo apt install gcc-mingw-w64"; \
+			echo "ERROR: $$cc not found. Run: sudo apt install gcc-mingw-w64"; \
 			exit 1; }; \
 	done
 endef
@@ -35,8 +36,8 @@ HEXA_WINE_PRE_CONFIGURE_HOOKS += HEXA_WINE_CHECK_MINGW
 
 HEXA_WINE_CONF_ENV = FREETYPE_CONFIG=$(STAGING_DIR)/usr/bin/freetype-config
 
-# O Buildroot passa --disable-nls (gettext), mas no Wine isso desliga o
-# diretorio nls/ (locale.nls, l_intl.nls...), sem o qual o wineserver nao sobe.
+# Buildroot passes --disable-nls (gettext), but in Wine that disables the
+# nls/ directory (locale.nls, l_intl.nls...), without which wineserver fails.
 HEXA_WINE_CONF_OPTS += \
 	--with-wine-tools=../host-wine-$(HEXA_WINE_VERSION) \
 	--enable-archs=i386,x86_64 \
@@ -60,23 +61,23 @@ HEXA_WINE_CONF_OPTS += \
 	--without-krb5 \
 	--without-netapi \
 	--without-opencl \
-	--without-opengl \
 	--without-oss \
 	--without-pcap \
 	--without-pcsclite \
-	--without-pulse \
 	--without-sane \
 	--without-sdl \
 	--without-usb \
 	--without-v4l2 \
-	--without-vulkan
+	--with-opengl \
+	--with-vulkan \
+	--with-pulse
 
-# Veja o comentario equivalente em package/wine/wine.mk
+# See the equivalent comment in package/wine/wine.mk
 ifeq ($(BR2_TOOLCHAIN_EXTERNAL),y)
 HEXA_WINE_CONF_OPTS += TARGETFLAGS="-b $(TOOLCHAIN_EXTERNAL_PREFIX)"
 endif
 
-# O "make install" nao cria /usr/bin/wine (os outros comandos apontam para ele)
+# "make install" does not create /usr/bin/wine (the other commands point to it)
 define HEXA_WINE_LINK_LOADER
 	ln -sf ../lib/wine/x86_64-unix/wine $(TARGET_DIR)/usr/bin/wine
 endef
@@ -84,8 +85,8 @@ HEXA_WINE_POST_INSTALL_TARGET_HOOKS += HEXA_WINE_LINK_LOADER
 
 $(eval $(autotools-package))
 
-# O driver Wayland do Wine precisa da libxkbregistry, que o Buildroot desliga
-# no libxkbcommon. Religamos aqui (ela depende da libxml2).
+# Wine's Wayland driver needs libxkbregistry, which Buildroot disables in
+# libxkbcommon. Re-enable it here (it depends on libxml2).
 ifeq ($(BR2_PACKAGE_HEXA_WINE),y)
 LIBXKBCOMMON_CONF_OPTS := \
 	$(filter-out -Denable-xkbregistry=false,$(LIBXKBCOMMON_CONF_OPTS)) \

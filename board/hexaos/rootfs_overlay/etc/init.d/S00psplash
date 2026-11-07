@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tela de boot do hexaOS (logo enquanto o sistema inicia)
+# hexaOS boot splash (logo while the system starts)
 
 case "$1" in
     start)

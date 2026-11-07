@@ -1,5 +1,5 @@
 #!/bin/sh
-# Gera disk.img (GPT: particao EFI + raiz ext4), pronta para QEMU ou pendrive.
+# Builds disk.img (GPT: EFI partition + ext4 root), ready for QEMU or a USB drive.
 set -e
 
 BOARD_DIR=$(dirname "$0")

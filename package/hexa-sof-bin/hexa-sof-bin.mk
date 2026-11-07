@@ -1,13 +1,13 @@
 ################################################################################
 #
-# hexa-sof-bin: firmware de audio Intel SOF (Meteor Lake)
+# hexa-sof-bin: Intel SOF audio firmware (Meteor Lake)
 #
 ################################################################################
 
 HEXA_SOF_BIN_VERSION = 2026.09.2
 HEXA_SOF_BIN_SOURCE = sof-bin-$(HEXA_SOF_BIN_VERSION).tar.gz
 HEXA_SOF_BIN_SITE = https://github.com/thesofproject/sof-bin/releases/download/v$(HEXA_SOF_BIN_VERSION)
-HEXA_SOF_BIN_LICENSE = BSD-3-Clause (firmware), Intel (binarios assinados)
+HEXA_SOF_BIN_LICENSE = BSD-3-Clause (firmware), Intel (signed binaries)
 HEXA_SOF_BIN_LICENSE_FILES = LICENCE.Intel
 HEXA_SOF_BIN_INSTALL_STAGING = NO
 

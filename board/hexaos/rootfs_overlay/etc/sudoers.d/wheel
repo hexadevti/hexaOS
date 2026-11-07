@@ -1,0 +1,2 @@
+# Members of the wheel group (e.g. hexa) may use sudo with their own password
+%wheel ALL=(ALL:ALL) ALL

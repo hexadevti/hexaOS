@@ -1,8 +1,8 @@
 #!/bin/bash
-# Teste automatico: liga o hexaOS no QEMU (UEFI, sem janela), espera a area de
-# trabalho, abre o terminal, e depois confere o sistema pelo login em texto (tty2).
-# Salva capturas de tela em PNG.
-# Uso (no WSL): bash scripts/smoke-test.sh [pasta-de-saida]
+# Automated test: boots hexaOS in QEMU (UEFI, headless), waits for the desktop,
+# opens the terminal, then checks the system through the text login (tty2).
+# Saves PNG screenshots.
+# Usage (in WSL): bash scripts/smoke-test.sh [output-dir]
 set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-$HOME/hexaos-build}"
@@ -15,20 +15,21 @@ mkdir -p "$SHOTS"
 rm -f "$SHOTS"/*.png
 cp "$IMG" "$RUN_IMG"
 
-# -smap: o TCG do QEMU 8.x emula o iretq em modo usuario como acesso de
-# supervisor e o SMAP derruba o Wine (kernel oops). Hardware real nao tem isso.
+# -smap: QEMU 8.x TCG emulates a user-mode iretq as a supervisor access and
+# SMAP then kills Wine (kernel oops). Real hardware is not affected.
 ACCEL="-accel tcg -cpu max,-smap"
 [ -w /dev/kvm ] && ACCEL="-accel kvm -cpu host"
 
-# Digita um texto via monitor do QEMU (sendkey)
+# Types text through the QEMU monitor (sendkey)
 type_text() {
     local s="$1" c k
     for ((i = 0; i < ${#s}; i++)); do
         c="${s:i:1}"
         case "$c" in
-            " ") k=spc ;; "-") k=minus ;; "." ) k=dot ;; "/") k=slash ;;
-            "|") k=shift-backslash ;; "_") k=shift-minus ;; "=") k=equal ;; ";") k=semicolon ;;
-            "*") k=shift-8 ;; ">") k=shift-dot ;; "'") k=apostrophe ;; ",") k=comma ;; "&") k=shift-7 ;;
+            # Key positions of the ABNT2 layout used by hexaOS (QEMU sends US scancodes)
+            " ") k=spc ;; "-") k=minus ;; "." ) k=dot ;; "/") k=ro ;;
+            "|") k=shift-less ;; "_") k=shift-minus ;; "=") k=equal ;; ";") k=slash ;;
+            "*") k=shift-8 ;; ">") k=shift-dot ;; "'") k=grave_accent ;; ",") k=comma ;; "&") k=shift-7 ;;
             [A-Z]) k="shift-${c,,}" ;;
             *) k="$c" ;;
         esac
@@ -38,40 +39,55 @@ type_text() {
 }
 
 {
-    # Algumas capturas durante o boot (tela de splash)
+    # A few screenshots during boot (splash screen)
     for t in 6 10 14 18; do
         sleep 4
         echo "screendump $SHOTS/1-boot-${t}s.png -f png"
     done
     sleep "$DESKTOP_WAIT"
     echo "screendump $SHOTS/2-desktop.png -f png"
-    # Clica no primeiro icone do painel (terminal)
+    # Click the first panel icon (terminal)
     python3 "$(dirname "$0")/qmp-click.py" "$QMP_SOCK" 20 15 1280 800 >&2 || true
     sleep 15
-    # Teclado do hexaOS e ABNT2: usar so letras, numeros, espaco, - . /
+    # type_text maps characters to ABNT2 key positions
     type_text "uname -r"
     type_text "free -m"
     type_text "wine --version"
     sleep 3
     echo "screendump $SHOTS/3-terminal.png -f png"
-    # Abre o Bloco de Notas do Wine (terceiro icone do painel)
+    # Open Wine Notepad (third panel icon)
     if [ "${WINE_TEST:-1}" = 1 ]; then
         python3 "$(dirname "$0")/qmp-click.py" "$QMP_SOCK" 80 15 1280 800 >&2 || true
         sleep "${WINE_WAIT:-60}"
         echo "screendump $SHOTS/3b-wine.png -f png"
     fi
-    # Vai para o login em texto (tty2) e confere drivers e logs
+    # Open Firefox (fourth panel icon) and VS Code (fifth)
+    if [ "${APPS_TEST:-1}" = 1 ]; then
+        python3 "$(dirname "$0")/qmp-click.py" "$QMP_SOCK" "${FIREFOX_X:-110}" 15 1280 800 >&2 || true
+        sleep "${APP_WAIT:-60}"
+        echo "screendump $SHOTS/3c-firefox.png -f png"
+        python3 "$(dirname "$0")/qmp-click.py" "$QMP_SOCK" "${VSCODE_X:-140}" 15 1280 800 >&2 || true
+        sleep "${APP_WAIT:-60}"
+        echo "screendump $SHOTS/3d-vscode.png -f png"
+    fi
+    # Switch to the text login (tty2) and check drivers and logs
     echo "sendkey ctrl-alt-f2"
     sleep 4
     type_text "root"
     sleep 3
-    type_text "clear; cat /etc/os-release | head -2; date; ps | grep -E 'weston|seatd|iwd|wine|notepad' | grep -v grep | cut -c1-90; tail -4 /tmp/weston.log; df -h /; free -m"
+    type_text "clear; cat /etc/os-release | head -2; date; ps | grep -E 'weston|seatd|iwd|wine|notepad' | grep -v grep | cut -c1-90; df -h /; free -m"
+    sleep 4
+    echo "screendump $SHOTS/4a-tty2.png -f png"
+    type_text "clear; tail -40 /tmp/weston.log"
     sleep 4
     echo "screendump $SHOTS/4-tty2.png -f png"
+    type_text "clear; python3 --version; git --version; docker --version; ls /etc/init.d; ps | grep -E 'dockerd|containerd|firefox|code' | grep -v grep | cut -c1-90"
+    sleep 6
+    echo "screendump $SHOTS/5-dev.png -f png"
     sleep 1
     echo "quit"
-} | timeout $((DESKTOP_WAIT + ${WINE_WAIT:-60} + 120)) qemu-system-x86_64 \
-    -M q35 $ACCEL -smp 4 -m 2G \
+} | timeout $((DESKTOP_WAIT + ${WINE_WAIT:-60} + 2 * ${APP_WAIT:-60} + 150)) qemu-system-x86_64 \
+    -M q35 $ACCEL -smp 4 -m 3G \
     -bios /usr/share/ovmf/OVMF.fd \
     -drive file="$RUN_IMG",if=virtio,format=raw \
     -nic user,model=virtio-net-pci \
@@ -82,5 +98,5 @@ type_text() {
     -monitor stdio > "$SHOTS/monitor.log" || true
 
 rm -f "$RUN_IMG" "$QMP_SOCK"
-echo "Capturas em: $SHOTS"
+echo "Screenshots in: $SHOTS"
 ls -la "$SHOTS"

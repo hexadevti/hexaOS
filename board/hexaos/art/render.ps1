@@ -1,5 +1,5 @@
-# Renderiza a arte do hexaOS (precisa do Ghostscript no Windows).
-# Uso: powershell -File board\hexaos\art\render.ps1
+# Renders the hexaOS artwork (needs Ghostscript on Windows).
+# Usage: powershell -File board\hexaos\art\render.ps1
 $ErrorActionPreference = "Stop"
 $gs = (Get-Command gswin64c -ErrorAction SilentlyContinue).Source
 if (-not $gs) { $gs = "$env:LOCALAPPDATA\Programs\Ghostscript\bin\gswin64c.exe" }

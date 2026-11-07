@@ -1,12 +1,12 @@
 %!PS
-% Rotinas de desenho compartilhadas pela arte do hexaOS.
-% Paleta: fundo #0b1220, ciano #22d3ee, azul #3b82f6.
+% Drawing routines shared by the hexaOS artwork.
+% Palette: background #0b1220, cyan #22d3ee, blue #3b82f6.
 
 /bg      { 0.043 0.071 0.125 } def
 /cyan    { 0.133 0.827 0.933 } def
 /blue    { 0.231 0.510 0.965 } def
 
-% cx cy r hexpath -> hexagono "em pe" (ponta para cima)
+% cx cy r hexpath -> "pointy-top" hexagon
 /hexpath {
   6 dict begin
   /r exch def /cy exch def /cx exch def
@@ -21,7 +21,7 @@
   end
 } def
 
-% Grade de hexagonos discreta: w h r grid
+% Subtle hexagon grid: w h r grid
 /hexgrid {
   8 dict begin
   /r exch def /h exch def /w exch def
@@ -38,14 +38,14 @@
   end
 } def
 
-% Logo: cx cy r logo  (hexagono externo ciano, interno com degrade)
+% Logo: cx cy r logo  (cyan outer hexagon, gradient inner one)
 /logo {
   6 dict begin
   /r exch def /cy exch def /cx exch def
-  % brilho externo
+  % outer glow
   cyan setrgbcolor r 0.11 mul setlinewidth 1 setlinejoin
   cx cy r hexpath stroke
-  % hexagono interno com degrade azul->ciano
+  % inner hexagon with blue->cyan gradient
   gsave
     cx cy r 0.62 mul hexpath clip
     << /ShadingType 2 /ColorSpace /DeviceRGB
@@ -53,7 +53,7 @@
        /Function << /FunctionType 2 /Domain [0 1] /C0 [blue] /C1 [cyan] /N 1 >>
        /Extend [true true] >> shfill
   grestore
-  % "H" estilizado em fundo escuro
+  % stylized "H" in the dark background color
   bg setrgbcolor r 0.09 mul setlinewidth 0 setlinecap
   cx r 0.20 mul sub cy r 0.30 mul sub moveto 0 r 0.60 mul rlineto stroke
   cx r 0.20 mul add cy r 0.30 mul sub moveto 0 r 0.60 mul rlineto stroke
@@ -61,7 +61,7 @@
   end
 } def
 
-% texto centralizado: (str) cx y size centertext
+% centered text: (str) cx y size centertext
 /centertext {
   4 dict begin
   /sz exch def /y exch def /cx exch def /s exch def

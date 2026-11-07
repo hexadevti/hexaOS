@@ -1,4 +1,4 @@
-# Saidas de compilacao ficam fora do repo (~/hexaos-build no WSL)
+# Build output lives outside the repo (~/hexaos-build in WSL)
 output/
 *.img
 *.log

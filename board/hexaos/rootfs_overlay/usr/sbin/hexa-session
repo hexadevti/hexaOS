@@ -1,6 +1,6 @@
 #!/bin/sh
-# Sessao do tty1 (chamada pelo init): interface grafica do usuario "hexa".
-# Com "hexaos.text" na linha de comando do kernel, abre login em modo texto.
+# tty1 session (started by init): graphical desktop for the "hexa" user.
+# With "hexaos.text" on the kernel command line, a text login is shown instead.
 
 if grep -qw hexaos.text /proc/cmdline; then
     exec /sbin/getty -L tty1 0 linux
@@ -10,20 +10,42 @@ USER_NAME=hexa
 USER_ID=$(id -u "$USER_NAME")
 RUNTIME_DIR=/run/user/$USER_ID
 
-# Fecha a tela de boot
+# Close the boot splash
 PSPLASH_FIFO_DIR=/run/psplash psplash-write QUIT 2>/dev/null
 
 mkdir -p "$RUNTIME_DIR"
 chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR"
 chmod 700 "$RUNTIME_DIR"
 
-# Espera o seatd (gerenciador de acesso a tela/teclado/mouse)
+# Wait for seatd (grants access to the display, keyboard and mouse)
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -S /run/seatd.sock ] && break
     sleep 0.5
 done
 
-su "$USER_NAME" -c "cd ~ && LANG=pt_BR.UTF-8 TZ=America/Sao_Paulo XDG_RUNTIME_DIR=$RUNTIME_DIR exec weston --log=/tmp/weston.log"
+# Intel GPU (i915/xe): render the desktop with OpenGL. Otherwise (QEMU, safe mode): CPU.
+RENDERER=pixman
+for drv in /sys/class/drm/card*/device/driver; do
+    case "$(basename "$(readlink -f "$drv")")" in
+        i915|xe) RENDERER=gl ;;
+    esac
+done
 
-# Se o Weston fechar/falhar, espera um pouco antes de o init reiniciar
+cat > "$RUNTIME_DIR/session.sh" <<SESSION
+#!/bin/sh
+# Sound: PipeWire + PulseAudio server + session manager
+pipewire &
+pipewire-pulse &
+wireplumber &
+exec weston --renderer=$RENDERER --log=/tmp/weston.log
+SESSION
+chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR/session.sh"
+chmod 755 "$RUNTIME_DIR/session.sh"
+
+su "$USER_NAME" -c "cd ~ && \
+    LANG=en_US.UTF-8 TZ=America/Sao_Paulo XDG_RUNTIME_DIR=$RUNTIME_DIR \
+    XDG_SESSION_TYPE=wayland MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=wayland \
+    exec dbus-run-session -- $RUNTIME_DIR/session.sh"
+
+# If Weston exits/fails, wait a little before init restarts this script
 sleep 3

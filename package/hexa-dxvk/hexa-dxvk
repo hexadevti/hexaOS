@@ -1,0 +1,23 @@
+#!/bin/sh
+# Installs (or removes) DXVK in the Wine prefix ($WINEPREFIX or ~/.wine).
+# Usage: hexa-dxvk [install|uninstall]
+set -e
+PREFIX="${WINEPREFIX:-$HOME/.wine}"
+DLLS="d3d8 d3d9 d3d10core d3d11 dxgi"
+ACTION="${1:-install}"
+
+[ -d "$PREFIX/drive_c" ] || wineboot -i
+SYS64="$PREFIX/drive_c/windows/system32"
+SYS32="$PREFIX/drive_c/windows/syswow64"
+
+for dll in $DLLS; do
+    if [ "$ACTION" = uninstall ]; then
+        wine reg delete 'HKCU\Software\Wine\DllOverrides' /v "$dll" /f > /dev/null 2>&1 || true
+    else
+        cp -f "/usr/share/dxvk/x64/$dll.dll" "$SYS64/"
+        cp -f "/usr/share/dxvk/x32/$dll.dll" "$SYS32/"
+        wine reg add 'HKCU\Software\Wine\DllOverrides' /v "$dll" /d native /f > /dev/null 2>&1
+    fi
+done
+[ "$ACTION" = uninstall ] && wineboot -u
+echo "DXVK: $ACTION done in $PREFIX"

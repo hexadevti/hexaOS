@@ -1,4 +1,4 @@
-Cores da tela de boot do hexaOS (fundo azul-escuro, barra ciano).
+hexaOS boot splash colors (dark blue background, cyan progress bar).
 
 --- a/psplash-colors.h
 +++ b/psplash-colors.h

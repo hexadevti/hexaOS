@@ -1,9 +1,9 @@
 config BR2_PACKAGE_HEXA_SOF_BIN
-	bool "hexa-sof-bin (firmware de audio Intel SOF)"
+	bool "hexa-sof-bin (Intel SOF audio firmware)"
 	depends on BR2_x86_64
 	help
-	  Firmware e topologias do Sound Open Firmware para o DSP de
-	  audio dos processadores Intel Core Ultra (Meteor Lake).
-	  Instala so o necessario para o "mtl" em /lib/firmware/intel.
+	  Sound Open Firmware binaries and topologies for the audio DSP
+	  of Intel Core Ultra (Meteor Lake) processors.
+	  Installs only what "mtl" needs into /lib/firmware/intel.
 
 	  https://github.com/thesofproject/sof-bin

@@ -1,0 +1,36 @@
+#!/bin/sh
+# Full development environment (Ubuntu) in a Docker container.
+# Your home folder (/home/hexa) is shared; install anything with apt.
+# Usage: hexa-dev            -> opens a shell in Ubuntu
+#        hexa-dev command... -> runs a command inside it
+#        hexa-dev --reset    -> deletes the container (start over)
+NAME=hexa-dev
+IMAGE=${HEXA_DEV_IMAGE:-ubuntu:24.04}
+
+if ! docker info >/dev/null 2>&1; then
+    echo "Docker is not running (sudo /etc/init.d/S60dockerd start)" >&2
+    exit 1
+fi
+
+if [ "$1" = "--reset" ]; then
+    docker rm -f "$NAME"
+    exit $?
+fi
+
+if ! docker container inspect "$NAME" >/dev/null 2>&1; then
+    echo "Creating the $NAME environment ($IMAGE), first time only..."
+    docker run -d --name "$NAME" --hostname "$NAME" --network host \
+        -v "$HOME:$HOME" -w "$HOME" "$IMAGE" sleep infinity || exit 1
+    docker exec "$NAME" sh -c '
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update && apt-get install -y build-essential git curl wget \
+            sudo python3 python3-pip python3-venv nodejs npm cmake pkg-config
+        userdel -r ubuntu 2>/dev/null
+        groupadd -g '"$(id -g)"' '"$(id -gn)"' 2>/dev/null
+        useradd -u '"$(id -u)"' -g '"$(id -g)"' -d '"$HOME"' -s /bin/bash '"$(id -un)"'
+        echo "'"$(id -un)"' ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/hexa' || exit 1
+fi
+
+docker start "$NAME" >/dev/null
+[ $# -eq 0 ] && set -- bash -l
+exec docker exec -it -u "$(id -u)" -e TERM "$NAME" "$@"

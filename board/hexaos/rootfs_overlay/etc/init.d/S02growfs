@@ -1,0 +1,23 @@
+#!/bin/sh
+# First boot: grow the system partition to the end of the disk/USB drive
+# and expand the ext4 filesystem (online). Runs only once.
+MARK=/etc/hexaos-growfs-done
+[ "$1" = start ] || exit 0
+[ -e "$MARK" ] && exit 0
+
+# Find the root partition from its device number (major:minor)
+DEVNUM=$(mountpoint -d /) || exit 0
+SYS=$(readlink -f "/sys/dev/block/$DEVNUM")
+[ -f "$SYS/partition" ] || exit 0
+PART=$(cat "$SYS/partition")
+PARTDEV=/dev/$(basename "$SYS")
+DISK=/dev/$(basename "$(dirname "$SYS")")
+
+echo "hexaOS: growing $PARTDEV to fill the disk..."
+# The image has an exact size: move the backup GPT header to the end of the disk
+sfdisk --relocate gpt-bak-std "$DISK" >/dev/null 2>&1
+echo ", +" | sfdisk --no-reread --no-tell-kernel -N "$PART" "$DISK" >/dev/null 2>&1
+partx -u -n "$PART" "$DISK" 2>/dev/null
+resize2fs "$PARTDEV" >/dev/null 2>&1
+touch "$MARK"
+exit 0
