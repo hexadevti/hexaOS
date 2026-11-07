@@ -23,7 +23,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.5
 done
 
-su "$USER_NAME" -c "cd ~ && XDG_RUNTIME_DIR=$RUNTIME_DIR exec weston --log=/tmp/weston.log"
+su "$USER_NAME" -c "cd ~ && LANG=pt_BR.UTF-8 TZ=America/Sao_Paulo XDG_RUNTIME_DIR=$RUNTIME_DIR exec weston --log=/tmp/weston.log"
 
 # Se o Weston fechar/falhar, espera um pouco antes de o init reiniciar
 sleep 3

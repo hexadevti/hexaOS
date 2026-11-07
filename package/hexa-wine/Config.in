@@ -1,0 +1,24 @@
+config BR2_PACKAGE_HEXA_WINE
+	bool "hexa-wine (Wine 64-bit com WoW64)"
+	depends on BR2_x86_64
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL
+	depends on BR2_PACKAGE_HAS_UDEV
+	select BR2_PACKAGE_WAYLAND
+	select BR2_PACKAGE_LIBXKBCOMMON
+	select BR2_PACKAGE_LIBXML2 # libxkbregistry
+	select BR2_PACKAGE_FREETYPE
+	select BR2_PACKAGE_FONTCONFIG
+	select BR2_PACKAGE_ALSA_LIB
+	select BR2_PACKAGE_ALSA_LIB_SEQ
+	select BR2_PACKAGE_ALSA_LIB_RAWMIDI
+	select BR2_PACKAGE_GNUTLS
+	help
+	  Wine para x86_64 no modo WoW64 novo: roda programas Windows
+	  de 64 e 32 bits sem precisar de bibliotecas Linux de 32 bits.
+	  Usa o driver Wayland do Wine (nao precisa de X11).
+
+	  Exige os compiladores mingw no computador que compila:
+	    sudo apt install gcc-mingw-w64
+
+	  https://www.winehq.org

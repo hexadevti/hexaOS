@@ -1,2 +1,3 @@
-# Pacotes proprios do hexaOS entram aqui, ex.:
-# source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-shell/Config.in"
+# Pacotes proprios do hexaOS
+source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-wine/Config.in"
+source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-sof-bin/Config.in"

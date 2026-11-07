@@ -1,5 +1,7 @@
 # Ambiente padrao do hexaOS
 export LANG=pt_BR.UTF-8
+# Programas instalados pelo usuario (ex.: Claude Code fica em ~/.local/bin)
+export PATH="$HOME/.local/bin:$PATH"
 [ -z "$XDG_RUNTIME_DIR" ] && export XDG_RUNTIME_DIR=/run/user/$(id -u)
 
 # Prompt colorido
