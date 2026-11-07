@@ -1,0 +1,71 @@
+%!PS
+% Rotinas de desenho compartilhadas pela arte do hexaOS.
+% Paleta: fundo #0b1220, ciano #22d3ee, azul #3b82f6.
+
+/bg      { 0.043 0.071 0.125 } def
+/cyan    { 0.133 0.827 0.933 } def
+/blue    { 0.231 0.510 0.965 } def
+
+% cx cy r hexpath -> hexagono "em pe" (ponta para cima)
+/hexpath {
+  6 dict begin
+  /r exch def /cy exch def /cx exch def
+  newpath
+  0 1 5 {
+    /i exch def
+    /a i 60 mul 30 add def
+    cx a cos r mul add  cy a sin r mul add
+    i 0 eq { moveto } { lineto } ifelse
+  } for
+  closepath
+  end
+} def
+
+% Grade de hexagonos discreta: w h r grid
+/hexgrid {
+  8 dict begin
+  /r exch def /h exch def /w exch def
+  /dx r 3 sqrt mul def
+  /dy r 1.5 mul def
+  0 1 h dy div cvi 1 add {
+    /row exch def
+    /off row 2 mod 0 eq { 0 } { dx 2 div } ifelse def
+    0 1 w dx div cvi 1 add {
+      /col exch def
+      col dx mul off add  row dy mul  r 0.92 mul hexpath stroke
+    } for
+  } for
+  end
+} def
+
+% Logo: cx cy r logo  (hexagono externo ciano, interno com degrade)
+/logo {
+  6 dict begin
+  /r exch def /cy exch def /cx exch def
+  % brilho externo
+  cyan setrgbcolor r 0.11 mul setlinewidth 1 setlinejoin
+  cx cy r hexpath stroke
+  % hexagono interno com degrade azul->ciano
+  gsave
+    cx cy r 0.62 mul hexpath clip
+    << /ShadingType 2 /ColorSpace /DeviceRGB
+       /Coords [cx r sub cy r sub cx r add cy r add]
+       /Function << /FunctionType 2 /Domain [0 1] /C0 [blue] /C1 [cyan] /N 1 >>
+       /Extend [true true] >> shfill
+  grestore
+  % "H" estilizado em fundo escuro
+  bg setrgbcolor r 0.09 mul setlinewidth 0 setlinecap
+  cx r 0.20 mul sub cy r 0.30 mul sub moveto 0 r 0.60 mul rlineto stroke
+  cx r 0.20 mul add cy r 0.30 mul sub moveto 0 r 0.60 mul rlineto stroke
+  cx r 0.20 mul sub cy moveto r 0.40 mul 0 rlineto stroke
+  end
+} def
+
+% texto centralizado: (str) cx y size centertext
+/centertext {
+  4 dict begin
+  /sz exch def /y exch def /cx exch def /s exch def
+  /Helvetica-Bold findfont sz scalefont setfont
+  cx s stringwidth pop 2 div sub y moveto s show
+  end
+} def

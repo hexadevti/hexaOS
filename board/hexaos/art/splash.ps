@@ -1,0 +1,10 @@
+%!PS
+% Logo da tela de boot (psplash), 480x420, fundo solido = cor de fundo do splash
+(common.ps) run
+<< /PageSize [480 420] >> setpagedevice
+
+bg setrgbcolor 0 0 480 420 rectfill
+240 250 140 logo
+1 1 1 setrgbcolor (hexaOS) 240 40 64 centertext
+
+showpage

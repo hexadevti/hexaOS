@@ -1,0 +1,3 @@
+# usuario uid grupo gid senha home shell grupos-extras comentario
+# Senha inicial: hexa  (troque com "passwd" dentro do sistema)
+hexa -1 hexa -1 =hexa /home/hexa /bin/bash video,input,audio,netdev Usuario hexaOS

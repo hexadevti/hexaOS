@@ -1,0 +1,15 @@
+#!/bin/sh
+# Tela de boot do hexaOS (logo enquanto o sistema inicia)
+
+case "$1" in
+    start)
+        grep -qw hexaos.text /proc/cmdline && exit 0
+        [ -e /dev/fb0 ] || exit 0
+        mkdir -p /run/psplash
+        PSPLASH_FIFO_DIR=/run/psplash /usr/bin/psplash --no-console-switch >/dev/null 2>&1 &
+        ;;
+    stop)
+        PSPLASH_FIFO_DIR=/run/psplash psplash-write QUIT 2>/dev/null
+        ;;
+esac
+exit 0

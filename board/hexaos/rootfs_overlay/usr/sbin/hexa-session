@@ -1,0 +1,29 @@
+#!/bin/sh
+# Sessao do tty1 (chamada pelo init): interface grafica do usuario "hexa".
+# Com "hexaos.text" na linha de comando do kernel, abre login em modo texto.
+
+if grep -qw hexaos.text /proc/cmdline; then
+    exec /sbin/getty -L tty1 0 linux
+fi
+
+USER_NAME=hexa
+USER_ID=$(id -u "$USER_NAME")
+RUNTIME_DIR=/run/user/$USER_ID
+
+# Fecha a tela de boot
+PSPLASH_FIFO_DIR=/run/psplash psplash-write QUIT 2>/dev/null
+
+mkdir -p "$RUNTIME_DIR"
+chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR"
+chmod 700 "$RUNTIME_DIR"
+
+# Espera o seatd (gerenciador de acesso a tela/teclado/mouse)
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S /run/seatd.sock ] && break
+    sleep 0.5
+done
+
+su "$USER_NAME" -c "cd ~ && XDG_RUNTIME_DIR=$RUNTIME_DIR exec weston --log=/tmp/weston.log"
+
+# Se o Weston fechar/falhar, espera um pouco antes de o init reiniciar
+sleep 3
