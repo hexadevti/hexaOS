@@ -1,0 +1,49 @@
+desktop-shell: also switch windows with Alt+Tab
+
+Weston only binds the window switcher to <binding-modifier>+Tab (Super+Tab).
+hexaOS users expect Alt+Tab, as on Windows. Changing binding-modifier to alt
+would also move Alt+drag, Alt+K (force kill) and friends onto Alt, so add a
+second Alt+Tab binding instead, and let the switcher remember which modifier
+opened it so it closes when that modifier is released.
+
+Upstream-Status: Inappropriate [hexaOS specific]
+
+--- a/desktop-shell/shell.c	2026-11-08 14:06:17.718832404 +0000
++++ b/desktop-shell/shell.c	2026-11-08 14:06:17.738835748 +0000
+@@ -4234,6 +4234,7 @@
+ 
+ struct switcher {
+ 	struct desktop_shell *shell;
++	uint32_t modifier;	/* the modifier held to open it (Super or Alt) */
+ 	struct weston_view *current;
+ 	struct wl_listener listener;
+ 	struct weston_keyboard_grab grab;
+@@ -4357,7 +4358,7 @@
+ 	struct switcher *switcher = container_of(grab, struct switcher, grab);
+ 	struct weston_seat *seat = grab->keyboard->seat;
+ 
+-	if ((seat->modifier_state & switcher->shell->binding_modifier) == 0)
++	if ((seat->modifier_state & switcher->modifier) == 0)
+ 		switcher_destroy(switcher);
+ }
+ 
+@@ -4387,6 +4388,8 @@
+ 		return;
+ 
+ 	switcher->shell = shell;
++	switcher->modifier = keyboard->seat->modifier_state &
++			     (shell->binding_modifier | MODIFIER_ALT);
+ 	switcher->current = NULL;
+ 	switcher->listener.notify = switcher_handle_view_destroy;
+ 	wl_list_init(&switcher->listener.link);
+@@ -4864,6 +4867,10 @@
+ 
+ 	weston_compositor_add_key_binding(ec, KEY_TAB, mod, switcher_binding,
+ 					  shell);
++	/* hexaOS: Alt+Tab switches windows too, as on Windows */
++	if (mod != MODIFIER_ALT)
++		weston_compositor_add_key_binding(ec, KEY_TAB, MODIFIER_ALT,
++						  switcher_binding, shell);
+ 	weston_compositor_add_key_binding(ec, KEY_F9, mod, backlight_binding,
+ 					  ec);
+ 	weston_compositor_add_key_binding(ec, KEY_F10, mod, backlight_binding,

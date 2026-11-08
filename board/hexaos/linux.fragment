@@ -79,6 +79,10 @@ CONFIG_SND_SOC_INTEL_MACH=y
 CONFIG_SND_SOC_INTEL_SKL_HDA_DSP_GENERIC_MACH=m
 CONFIG_SND_SOC_DMIC=m
 
+# Speakers: the MAX98390 amplifier driver is built by package/hexa-max98390.
+# /dev/i2c-N lets /etc/init.d/S12speakers find which amplifiers answer.
+CONFIG_I2C_CHARDEV=m
+
 # Wine: allow 16/32-bit Windows programs and emulated system calls
 CONFIG_IA32_EMULATION=y
 CONFIG_MODIFY_LDT_SYSCALL=y

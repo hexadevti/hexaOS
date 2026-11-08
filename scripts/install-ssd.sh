@@ -1,51 +1,31 @@
 #!/bin/bash
-# Linux part of install-ssd.ps1 (runs in WSL as root, with the disk attached
-# via "wsl --mount --bare"). Writes hexaOS to the partitions created by Windows.
-# Usage: install-ssd.sh <EFI-PARTUUID> <root-PARTUUID>
+# Linux part of install-ssd.ps1 (runs in WSL as the normal user, BEFORE anything
+# is written to the SSD). Makes a copy of the EFI partition image whose boot
+# menu points at the new root partition. Windows then writes the images itself,
+# so the SSD never has to be detached from Windows (WSL itself may live on it).
+# Usage: install-ssd.sh <root-PARTUUID>
+# Output: <images>/efi-part-install.vfat
 set -euo pipefail
 
-ESP_UUID="${1,,}"
-ROOT_UUID="${2,,}"
-IMAGES="${IMAGES:-/home/luciano/hexaos-build/images}"
+ROOT_UUID="${1,,}"
+IMAGES="${IMAGES:-$HOME/hexaos-build/images}"
+HOST="${HOST_DIR:-$HOME/hexaos-build/host}/bin"
+OUT="$IMAGES/efi-part-install.vfat"
+CFG=/EFI/BOOT/grub.cfg
 
-find_part() {
-    local dev
-    for _ in $(seq 1 20); do
-        dev=$(lsblk -rno PATH,PARTUUID | awk -v u="$1" 'tolower($2) == u { print $1 }')
-        [ -n "$dev" ] && { echo "$dev"; return 0; }
-        sleep 1
-    done
-    echo "Partition with PARTUUID $1 not found in WSL" >&2
-    return 1
-}
+[[ $ROOT_UUID =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+    echo "Invalid PARTUUID: $ROOT_UUID" >&2; exit 1; }
 
-ESP=$(find_part "$ESP_UUID")
-ROOT=$(find_part "$ROOT_UUID")
-echo "EFI partition:  $ESP"
-echo "Root partition: $ROOT"
+cp "$IMAGES/efi-part.vfat" "$OUT"
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+"$HOST/mtype" -i "$OUT" "::$CFG" > "$TMP"
+OLD=$(grep -o 'root=PARTUUID=[0-9a-fA-F-]*' "$TMP" | head -1 | cut -d= -f3)
+[ -n "$OLD" ] || { echo "root=PARTUUID not found in grub.cfg" >&2; exit 1; }
+sed -i "s/$OLD/$ROOT_UUID/g" "$TMP"
+"$HOST/mcopy" -o -i "$OUT" "$TMP" "::$CFG"
 
-# Safety: nothing may be mounted from these partitions
-if lsblk -rno MOUNTPOINTS "$ESP" "$ROOT" | grep -q .; then
-    echo "Partition is mounted, aborting" >&2; exit 1
-fi
-
-echo "== Writing EFI partition (grub + kernel)"
-dd if="$IMAGES/efi-part.vfat" of="$ESP" bs=4M conv=fsync status=none
-
-echo "== Writing system (rootfs)"
-dd if="$IMAGES/rootfs.ext2" of="$ROOT" bs=4M conv=fsync status=progress
-
-echo "== Growing the filesystem to fill the partition"
-e2fsck -fy "$ROOT" || [ $? -le 1 ]
-resize2fs "$ROOT"
-
-echo "== Pointing the boot config at the new partition"
-MNT=$(mktemp -d)
-mount "$ESP" "$MNT"
-CFG="$MNT/EFI/BOOT/grub.cfg"
-OLD=$(grep -o 'root=PARTUUID=[0-9a-fA-F-]*' "$CFG" | head -1 | cut -d= -f3)
-sed -i "s/$OLD/$ROOT_UUID/g" "$CFG"
-grep -m1 'root=PARTUUID' "$CFG"
-umount "$MNT"; rmdir "$MNT"
-sync
-echo "== Done"
+# Check the result
+N=$("$HOST/mtype" -i "$OUT" "::$CFG" | grep -c "root=PARTUUID=$ROOT_UUID")
+[ "$N" -ge 1 ] || { echo "grub.cfg was not updated" >&2; exit 1; }
+echo "Boot menu points at PARTUUID=$ROOT_UUID ($N entries)"

@@ -13,11 +13,23 @@ PART=$(cat "$SYS/partition")
 PARTDEV=/dev/$(basename "$SYS")
 DISK=/dev/$(basename "$(dirname "$SYS")")
 
-echo "hexaOS: growing $PARTDEV to fill the disk..."
-# The image has an exact size: move the backup GPT header to the end of the disk
-sfdisk --relocate gpt-bak-std "$DISK" >/dev/null 2>&1
-echo ", +" | sfdisk --no-reread --no-tell-kernel -N "$PART" "$DISK" >/dev/null 2>&1
-partx -u -n "$PART" "$DISK" 2>/dev/null
+# Only change the partition table when hexaOS is the last partition (USB drive,
+# whole-disk install). On a shared disk (dual boot, installed by
+# install-ssd.ps1) the partition already has its final size and other systems'
+# partitions follow it: the table is left alone and only the filesystem grows.
+LAST=1
+START=$(cat "$SYS/start")
+for p in "$(dirname "$SYS")"/*/partition; do
+    [ "$(cat "$(dirname "$p")/start")" -gt "$START" ] && LAST=0
+done
+
+if [ "$LAST" = 1 ]; then
+    echo "hexaOS: growing $PARTDEV to fill the disk..."
+    # The image has an exact size: move the backup GPT header to the end of the disk
+    sfdisk --relocate gpt-bak-std "$DISK" >/dev/null 2>&1
+    echo ", +" | sfdisk --no-reread --no-tell-kernel -N "$PART" "$DISK" >/dev/null 2>&1
+    partx -u -n "$PART" "$DISK" 2>/dev/null
+fi
 resize2fs "$PARTDEV" >/dev/null 2>&1
 touch "$MARK"
 exit 0

@@ -1,0 +1,7 @@
+# hexaOS Setup values (read by /usr/bin/hexa-setup).
+# Copy to board/hexaos/rootfs_overlay/etc/hexaos/setup.conf (ignored by git,
+# because it holds passwords) and rebuild. Inside the system it is readable by root only.
+
+# Wi-Fi network joined automatically (leave WIFI_SSID empty to skip)
+WIFI_SSID='MyNetwork'
+WIFI_PASSWORD='my-wifi-password'

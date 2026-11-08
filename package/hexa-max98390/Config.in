@@ -1,0 +1,15 @@
+config BR2_PACKAGE_HEXA_MAX98390
+	bool "hexa-max98390"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Driver for the four Maxim MAX98390 speaker amplifiers of the
+	  Samsung Galaxy Book4 Pro/Ultra and Book5 laptops (the kernel
+	  has none yet, so the speakers stay silent; headphones work).
+	  Out-of-tree build of the driver from thesofproject/linux
+	  PR #5616, as packaged by Andycodeman. /etc/init.d/S12speakers
+	  creates the three amplifiers that ACPI does not declare.
+
+	  https://github.com/Andycodeman/samsung-galaxy-book-linux-fixes
+
+comment "hexa-max98390 needs a Linux kernel to be built"
+	depends on !BR2_LINUX_KERNEL

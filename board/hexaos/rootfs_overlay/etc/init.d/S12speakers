@@ -1,0 +1,50 @@
+#!/bin/sh
+# Turns on the speakers of the Samsung Galaxy Book4/5 (Maxim MAX98390 amplifiers).
+# ACPI only declares the first amplifier (0x38, bound by udev to the
+# hexa-max98390 driver); the others (0x39, 0x3c, 0x3d) must be created by hand
+# on the same I2C bus. Does nothing on other computers.
+
+ADDRS="0x39 0x3c 0x3d"
+
+# I2C bus number of the ACPI amplifier (.../i2c-N/i2c-MAX98390:00 -> N)
+bus() {
+    for dev in /sys/bus/i2c/devices/*MAX98390*; do
+        [ -e "$dev" ] || continue
+        basename "$(dirname "$(readlink -f "$dev")")" | sed -n 's/^i2c-\([0-9][0-9]*\)$/\1/p'
+        return
+    done
+}
+
+start() {
+    BUS=$(bus)
+    [ -n "$BUS" ] || exit 0
+    printf 'Starting speakers (MAX98390): '
+    modprobe -q snd-hda-scodec-max98390-i2c || { echo "FAIL (no driver)"; exit 1; }
+    modprobe -q i2c-dev
+    found=""
+    for addr in $ADDRS; do
+        # Already created (e.g. restart)
+        [ -e "/sys/bus/i2c/devices/$BUS-00${addr#0x}" ] && { found="$found $addr"; continue; }
+        # Only create amplifiers that answer (2-amp models have fewer)
+        i2cget -y "$BUS" "$addr" 0x00 b >/dev/null 2>&1 || continue
+        echo "max98390-hda $addr" > "/sys/bus/i2c/devices/i2c-$BUS/new_device" 2>/dev/null &&
+            found="$found $addr"
+    done
+    echo "OK (bus $BUS: 0x38$found)"
+}
+
+stop() {
+    BUS=$(bus)
+    [ -n "$BUS" ] || exit 0
+    for addr in 0x3d 0x3c 0x39; do
+        [ -e "/sys/bus/i2c/devices/$BUS-00${addr#0x}" ] &&
+            echo "$addr" > "/sys/bus/i2c/devices/i2c-$BUS/delete_device" 2>/dev/null
+    done
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

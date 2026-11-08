@@ -9,6 +9,9 @@ CONF_DIR="$HOME/.config/hexaos"
 SETTINGS="$CONF_DIR/settings"        # values chosen here (shell variables)
 DESKTOP_INI="$CONF_DIR/desktop.ini"  # merged into Weston's config at login (hexa-session)
 
+# shellcheck source=/usr/lib/hexaos/wifi.sh
+. /usr/lib/hexaos/wifi.sh
+
 # Fall back to a common terminal type if this one is unknown
 infocmp >/dev/null 2>&1 || export TERM=xterm-256color
 
@@ -23,17 +26,19 @@ SCALE=1
 # Runs dialog and prints the user's choice on stdout
 d() { dialog --backtitle "$TITLE" "$@" 3>&1 1>&2 2>&3; }
 
-msg() {   # msg TITLE TEXT
-    local lines
+msg() {   # msg TITLE TEXT  (long texts scroll with the arrow keys)
+    local lines max
     lines=$(printf '%b\n' "$2" | wc -l)
-    dialog --backtitle "$TITLE" --title "$1" --no-collapse --msgbox "$2" $((lines + 5)) 76
+    max=$(( $(tput lines 2>/dev/null || echo 24) - 2 ))
+    [ $((lines + 5)) -gt "$max" ] && lines=$((max - 5))
+    dialog --backtitle "$TITLE" --title "$1" --no-collapse --msgbox "$2" $((lines + 5)) 80
 }
 
 info() { dialog --backtitle "$TITLE" --infobox "$1" 5 60; }
 
 ask() { dialog --backtitle "$TITLE" --title "$1" --yesno "$2" 9 70; }
 
-strip_colors() { sed 's/\x1b\[[0-9;]*m//g'; }
+strip_colors() { hx_strip_colors; }
 
 # Runs a command as administrator, asking for the password if needed
 as_root() {
@@ -95,18 +100,31 @@ offer_restart() {   # offer_restart WHAT
 
 # ------------------------------------------------------------------ Wi-Fi
 
-wifi_iface() {
-    local dev
-    for dev in /sys/class/net/*; do
-        [ -d "$dev/wireless" ] && { echo "${dev##*/}"; return; }
+wifi_iface() { hx_wifi_iface; }
+
+# Explains why there is no Wi-Fi interface: VM, card that failed to start, or no card
+wifi_missing() {
+    local dev card="" driver="none" log
+    for dev in /sys/bus/pci/devices/*; do
+        [ "$(cat "$dev/class" 2>/dev/null)" = 0x028000 ] && { card=$dev; break; }
     done
+    if [ -n "$card" ]; then
+        [ -e "$card/driver" ] && driver=$(basename "$(readlink "$card/driver")")
+        log=$(dmesg 2>/dev/null | grep -iE 'iwlwifi|wlan|firmware' | tail -n 6 |
+              sed 's/^\[[^]]*\] *//' | cut -c1-70)
+        msg "Wi-Fi" "A Wi-Fi card was found (PCI $(cat "$card/vendor"):$(cat "$card/device"), driver: $driver),\nbut it did not start. Its driver or firmware is probably missing.\n\nLast kernel messages:\n${log:-(none)}"
+    elif grep -qw hypervisor /proc/cpuinfo 2>/dev/null; then
+        msg "Wi-Fi" "No Wi-Fi adapter was found.\n\nThis is a virtual machine, which has no Wi-Fi: use the wired network."
+    else
+        msg "Wi-Fi" "No Wi-Fi adapter was found.\n\nCheck that Wi-Fi is not turned off in the BIOS/UEFI setup."
+    fi
 }
 
 wifi_menu() {
     local W c status powered
     W=$(wifi_iface)
     if [ -z "$W" ]; then
-        msg "Wi-Fi" "No Wi-Fi adapter was found.\n\n(In a virtual machine this is normal: use the wired network.)"
+        wifi_missing
         return
     fi
     while true; do
@@ -140,31 +158,56 @@ wifi_menu() {
     done
 }
 
+# Asks for a Wi-Fi password. The "Show"/"Hide" button switches between hidden
+# and visible typing, keeping what was already typed.
+wifi_ask_password() {   # wifi_ask_password SSID -> password on stdout
+    local ssid=$1 pass="" show=0 rc
+    while true; do
+        if [ $show = 1 ]; then
+            pass=$(d --title "Wi-Fi password" --extra-button --extra-label "Hide" \
+                     --inputbox "Password for \"$ssid\" (visible):" 10 64 "$pass")
+        else
+            pass=$(d --title "Wi-Fi password" --insecure --extra-button --extra-label "Show" \
+                     --passwordbox "Password for \"$ssid\":\n(\"Show\" displays what you type)" 11 64 "$pass")
+        fi
+        rc=$?
+        case $rc in
+            0)
+                if [ ${#pass} -lt 8 ] || [ ${#pass} -gt 63 ]; then
+                    msg "Wi-Fi" "A Wi-Fi (WPA) password has 8 to 63 characters; this one has ${#pass}."
+                    show=1
+                    continue
+                fi
+                printf '%s' "$pass"
+                return 0 ;;
+            3) show=$((1 - show)) ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
 # wifi_join IFACE SSID SECURITY [hidden]
 wifi_join() {
-    local W=$1 ssid=$2 sec=$3 cmd=connect pass i state
+    local W=$1 ssid=$2 sec=$3 cmd=connect pass out mark
     [ "$4" = hidden ] && cmd=connect-hidden
     if [ "$sec" = 8021x ]; then
         msg "Wi-Fi" "\"$ssid\" uses enterprise login (802.1X), which this menu does not set up.\nSee: man iwd.network"
         return
     fi
     info "Connecting to \"$ssid\"..."
+    mark=$(hx_wifi_mark)
     # Open or already-saved networks connect without asking for a password
-    if ! iwctl --dont-ask station "$W" "$cmd" "$ssid" >/dev/null 2>&1; then
-        pass=$(d --title "Wi-Fi password" --insecure --passwordbox "Password for \"$ssid\":" 9 60) || return
+    if ! out=$(iwctl --dont-ask station "$W" "$cmd" "$ssid" 2>&1); then
+        pass=$(wifi_ask_password "$ssid") || return
         info "Connecting to \"$ssid\"..."
-        iwctl --passphrase "$pass" station "$W" "$cmd" "$ssid" >/dev/null 2>&1
+        mark=$(hx_wifi_mark)
+        out=$(iwctl --passphrase "$pass" station "$W" "$cmd" "$ssid" 2>&1)
     fi
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        state=$(iwctl station "$W" show 2>/dev/null | strip_colors | awk '$1 == "State" {print $2}')
-        [ "$state" = connected ] && break
-        sleep 1
-    done
-    if [ "$state" = connected ]; then
+    if hx_wifi_wait "$W" 15; then
         sleep 2   # give DHCP a moment
         msg "Wi-Fi" "Connected to \"$ssid\".\nIt is saved and will reconnect automatically."
     else
-        msg "Wi-Fi" "Could not connect to \"$ssid\".\nCheck the password and try again."
+        msg "Wi-Fi: could not connect" "Could not connect to \"$ssid\".\n\n$(hx_wifi_diagnose "$W" "$out" "$mark")"
     fi
 }
 
@@ -485,6 +528,13 @@ Running:   $up"
 
 # ------------------------------------------------------------------ Power
 
+# power reboot|poweroff: no password needed for these two (/etc/sudoers.d/power)
+power() {
+    clear
+    sync
+    sudo -n "/sbin/$1" 2>/dev/null || as_root "/sbin/$1"
+}
+
 power_menu() {
     local c
     c=$(d --title "Restart / shut down" --cancel-label "Back" --no-tags --menu "" 12 60 3 \
@@ -493,8 +543,8 @@ power_menu() {
         off     "Shut down") || return
     case "$c" in
         desktop) restart_desktop ;;
-        reboot)  ask "Restart" "Restart the computer now?\nSave your work first." && { clear; as_root reboot; } ;;
-        off)     ask "Shut down" "Shut down the computer now?\nSave your work first." && { clear; as_root poweroff; } ;;
+        reboot)  ask "Restart" "Restart the computer now?\nSave your work first." && power reboot ;;
+        off)     ask "Shut down" "Shut down the computer now?\nSave your work first." && power poweroff ;;
     esac
 }
 

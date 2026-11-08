@@ -1,0 +1,16 @@
+%!PS
+% 24x24 panel icon: power (restart / shut down), the usual power symbol
+(common.ps) run
+/red    { 0.937 0.267 0.267 } def
+/orange { 0.976 0.451 0.086 } def
+gsave
+  12 12 11.5 hexpath clip
+  << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 24 24 0]
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [orange] /C1 [red] /N 1 >>
+     /Extend [true true] >> shfill
+grestore
+bg setrgbcolor 2.2 setlinewidth 1 setlinecap
+% Ring open at the top, and the vertical bar through the gap
+newpath 12 11.2 5.6 125 415 arc stroke
+newpath 12 11.5 moveto 12 18.2 lineto stroke
+showpage

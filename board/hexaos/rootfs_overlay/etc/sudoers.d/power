@@ -1,0 +1,3 @@
+# Members of the wheel group (e.g. hexa) may restart and shut down without a
+# password: the power button on the desktop panel (hexa-power) uses this.
+%wheel ALL=(root) NOPASSWD: /sbin/reboot, /sbin/poweroff

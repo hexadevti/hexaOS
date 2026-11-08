@@ -2,3 +2,6 @@
 output/
 *.img
 *.log
+
+# Machine-specific setup values (Wi-Fi password...): see board/hexaos/setup.conf.example
+board/hexaos/rootfs_overlay/etc/hexaos/setup.conf

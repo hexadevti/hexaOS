@@ -1,0 +1,28 @@
+#!/bin/bash
+# hexaOS power menu: restart or shut down the computer, or restart the desktop.
+# Opened from the power icon on the desktop panel, or by typing "hexa-power".
+# Restart and shut down need no password (/etc/sudoers.d/power).
+
+infocmp >/dev/null 2>&1 || export TERM=xterm-256color
+
+c=$(dialog --title "Power" --cancel-label "Cancel" --no-tags --default-item reboot \
+    --menu "Save your work first: open programs will close." 11 46 3 \
+    reboot  "Restart the computer" \
+    off     "Shut down" \
+    desktop "Restart the desktop" \
+    3>&1 1>&2 2>&3) || { clear; exit 0; }
+clear
+
+power() {   # power reboot|poweroff
+    sync
+    # As root (text console) run it directly; otherwise sudo, without a password
+    # (sudoers.d/power), falling back to asking for one.
+    if [ "$(id -u)" = 0 ]; then "/sbin/$1"; return; fi
+    sudo -n "/sbin/$1" 2>/dev/null || sudo -p "Password for $USER: " "/sbin/$1"
+}
+
+case "$c" in
+    reboot)  echo "Restarting..."; power reboot ;;
+    off)     echo "Shutting down..."; power poweroff ;;
+    desktop) kill "$(pidof weston)" 2>/dev/null ;;
+esac

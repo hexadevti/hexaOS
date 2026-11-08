@@ -25,18 +25,27 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/sbin/hexa-session           starts the desktop on tty1
   usr/bin/hexa-dev                Ubuntu development container (Docker)
   usr/bin/hexa-settings           Settings app (gear icon on the panel)
+  usr/bin/hexa-setup              applies this machine's settings (check-mark icon on the panel)
+  usr/bin/hexa-power              restart / shut down (power icon on the panel)
+  usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
+  etc/hexaos/setup.conf           values for hexa-setup, e.g. Wi-Fi password (not in git;
+                                  template: board/hexaos/setup.conf.example)
+  etc/init.d/S40iwd               iwd with its messages in /var/log/messages
   etc/init.d/S02growfs            grows the root partition on first boot
+  etc/init.d/S12speakers          creates the speaker amplifiers ACPI does not declare
+  etc/sudoers.d/power             restart/shut down without a password (wheel group)
   etc/xdg/weston/weston.ini       panel, wallpaper, keyboard layout
 package/hexa-wine/                64-bit Wine with WoW64 (Wayland driver)
 package/hexa-dxvk/                DXVK: DirectX 9/10/11 on Vulkan for Wine
 package/hexa-firefox/             Firefox ESR (official Mozilla binary)
 package/hexa-vscode/              Visual Studio Code (official Microsoft binary)
 package/hexa-sof-bin/             Meteor Lake audio firmware
-patches/                          tweaks to Buildroot packages (splash colors)
+package/hexa-max98390/            speaker amplifier driver (MAX98390, Galaxy Book4/5)
+patches/                          tweaks to Buildroot packages (splash colors, Alt+Tab in Weston)
 scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
-scripts/install-ssd.ps1           installs to a secondary SSD (dual boot)
+scripts/install-ssd.ps1           installs/updates hexaOS on a secondary SSD (dual boot)
 ```
 
 ## Requirements (Ubuntu / WSL)
@@ -74,8 +83,13 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Text login (root)          | Ctrl+Alt+F2 (root, no password) · back with Ctrl+Alt+F1 |
 | Boot menu                  | hold Esc during boot                                    |
 | Settings                   | gear icon on the panel (or `hexa-settings`): Wi-Fi, wired network, sound, brightness, scale, keyboard layout, timezone, password, services, restart/shut down |
+| Setup (Wi-Fi network...)   | check-mark icon on the panel (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`; safe to run again |
+| Restart / shut down        | power icon on the panel (or `hexa-power`); no password needed |
+| Switch windows             | Alt+Tab (hold Alt, press Tab to move on, release Alt to pick); Super+Tab works too |
+| Wi-Fi log                  | `grep iwd: /var/log/messages`, `dmesg \| grep wlan0`     |
 | Wi-Fi (command line)       | `iwctl station wlan0 scan`, `iwctl station wlan0 connect "NetworkName"` |
 | Volume (command line)      | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 70%` (or `alsamixer`) |
+| Speakers check             | `dmesg \| grep -i max98390` (4 amplifiers), `ls /sys/bus/i2c/drivers/max98390-hda` |
 | Web browser / YouTube      | Firefox icon on the panel                               |
 | Programming                | VS Code icon, or `code folder/`                         |
 | Full Ubuntu (apt)          | `hexa-dev` (Docker container sharing your home folder)  |
@@ -100,10 +114,37 @@ Before disabling Secure Boot, make sure your BitLocker recovery key is saved.
 hexaOS runs entirely from the USB drive: it does not touch the installed Windows.
 On first boot the system partition grows automatically to fill the whole drive.
 
+## Installing next to Windows (secondary SSD)
+
+`scripts/install-ssd.ps1` installs hexaOS into the unallocated space of the secondary SSD
+(dual boot). Existing partitions, including D:, are not changed and stay online, so it also
+works when WSL itself lives on that SSD.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-ssd.ps1 -DryRun   # checks only
+powershell -ExecutionPolicy Bypass -File scripts\install-ssd.ps1           # as Administrator
+```
+
+It creates two partitions (EFI 256 MB + hexaOS), writes and verifies them, and adds "hexaOS"
+at the end of the firmware boot menu (Windows stays the default). Boot it with F10 at
+power-on, with Secure Boot disabled. The filesystem grows to fill its partition on first boot.
+
+To update to a new build, run the same commands again: when hexaOS is already installed, the
+script rewrites its two partitions instead (type `UPDATE` to confirm) and keeps the boot entry.
+An update erases everything stored inside hexaOS (files in `/home/hexa`, saved Wi-Fi networks,
+password, settings), so copy what you need first.
+
+To remove it: delete the two partitions in Disk Management and the "hexaOS" entry
+(`bcdedit /enum firmware`, then `bcdedit /delete {id}`).
+
 ## Known limitations
 
 - QEMU has no Intel GPU: the desktop renders on the CPU and OpenGL is software (llvmpipe).
 - Audio: without UCM profiles, the volume may need manual tuning in `alsamixer`.
+- Speakers (Galaxy Book4 Pro): the amplifier driver is not in the mainline kernel yet
+  (package/hexa-max98390). Its speaker tuning comes from a Chromebook with the same
+  amplifiers, not from Samsung, and the amplifiers stay powered while the system runs.
+  Start with a low volume.
 - Games with kernel anti-cheat (Valorant, Fortnite...) do not run under Wine.
 - On first run Wine creates `~/.wine` (slow) and offers to install Wine Mono (.NET);
   this needs internet. "Cancel" works too.

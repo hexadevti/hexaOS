@@ -1,0 +1,3 @@
+# System log (/var/log/messages, kept in RAM): 1 MB per file, 2 old files
+# (room for iwd's Wi-Fi debug messages, see /etc/init.d/S40iwd)
+SYSLOGD_ARGS="-s 1024 -b 2"

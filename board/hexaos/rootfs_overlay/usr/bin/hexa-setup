@@ -1,0 +1,122 @@
+#!/bin/bash
+# hexaOS Setup: applies this machine's settings in one go (opened from the
+# "Setup" icon on the desktop panel, or by typing "hexa-setup").
+# Safe to run again at any time: each step only changes what is not set yet.
+#
+# The values (Wi-Fi network and password...) come from /etc/hexaos/setup.conf,
+# which only root can read, so this asks for your password (sudo) first.
+#
+# Adding a step: write a step_NAME function and add NAME to STEPS.
+
+CONF=/etc/hexaos/setup.conf
+STEPS=(wifi)
+
+# shellcheck source=/usr/lib/hexaos/wifi.sh
+. /usr/lib/hexaos/wifi.sh
+
+bold=$'\e[1m' green=$'\e[32m' red=$'\e[31m' yellow=$'\e[33m' off=$'\e[0m'
+title() { printf '\n%s== %s ==%s\n' "$bold" "$1" "$off"; }
+ok()    { printf '%s  OK   %s %s\n' "$green" "$off" "$1"; }
+fail()  { printf '%s  FAIL %s %s\n' "$red" "$off" "$1"; FAILED=1; }
+note()  { printf '%s  ..   %s %s\n' "$yellow" "$off" "$1"; }
+
+finish() {
+    echo
+    if [ "${FAILED:-0}" = 1 ]; then
+        echo "${red}${bold}Some steps failed (see above).${off}"
+    else
+        echo "${green}${bold}All done.${off}"
+    fi
+    # Opened from the panel: keep the window open until Enter
+    [ -t 0 ] && read -r -p "Press Enter to close..." _
+    exit "${FAILED:-0}"
+}
+
+# ------------------------------------------------------------------ Wi-Fi
+
+step_wifi() {
+    title "Wi-Fi"
+    local W out mark try state
+    if [ -z "$WIFI_SSID" ]; then
+        note "WIFI_SSID is not set in $CONF: skipped."
+        return
+    fi
+    W=$(hx_wifi_iface)
+    if [ -z "$W" ]; then
+        fail "No Wi-Fi adapter was found (open Settings > Wi-Fi for details)."
+        return
+    fi
+    if [ ${#WIFI_PASSWORD} -lt 8 ] || [ ${#WIFI_PASSWORD} -gt 63 ]; then
+        fail "WIFI_PASSWORD in $CONF must have 8 to 63 characters (it has ${#WIFI_PASSWORD})."
+        return
+    fi
+
+    # Turn the radio on if it was switched off
+    iwctl device "$W" set-property Powered on >/dev/null 2>&1
+
+    state=$(iwctl station "$W" show 2>/dev/null | hx_strip_colors | awk '/Connected network/ {sub(/.*Connected network +/, ""); print}')
+    if [ "$state" = "$WIFI_SSID" ]; then
+        ok "Already connected to \"$WIFI_SSID\"."
+        return
+    fi
+
+    # Save the network directly in iwd's store (as iwd itself would after a
+    # successful connection), so the password never goes through a text box.
+    # iwd notices the new file on its own and from now on connects at boot.
+    # File name: the SSID itself, or "=" + hex when it has other characters (man iwd.network)
+    local file=$WIFI_SSID
+    [[ $WIFI_SSID =~ ^[A-Za-z0-9_-]+$ ]] || file="=$(printf '%s' "$WIFI_SSID" | od -An -tx1 | tr -d ' \n')"
+    mkdir -p /var/lib/iwd
+    umask 077
+    printf '[Security]\nPassphrase=%s\n\n[Settings]\nAutoConnect=true\n' "$WIFI_PASSWORD" \
+        > "/var/lib/iwd/$file.psk"
+    ok "Saved \"$WIFI_SSID\" (/var/lib/iwd/$file.psk)."
+
+    for try in 1 2 3; do
+        note "Connecting to \"$WIFI_SSID\" on $W (attempt $try of 3)..."
+        iwctl station "$W" scan >/dev/null 2>&1
+        sleep 3
+        mark=$(hx_wifi_mark)
+        out=$(iwctl --dont-ask station "$W" connect "$WIFI_SSID" 2>&1)
+        if hx_wifi_wait "$W" 15; then
+            sleep 3   # DHCP
+            ok "Connected to \"$WIFI_SSID\"."
+            iwctl station "$W" show 2>/dev/null | hx_strip_colors |
+                awk '/IPv4 address/ {print "         Address: " $NF}'
+            return
+        fi
+    done
+    fail "Could not connect to \"$WIFI_SSID\"."
+    echo
+    hx_wifi_diagnose "$W" "$out" "$mark" | sed 's/^/    /'
+}
+
+# ------------------------------------------------------------------- main
+
+if [ "$(id -u)" != 0 ]; then
+    echo
+    echo "  hexaOS Setup changes system settings and needs your password."
+    echo
+    if ! sudo -v -p "  Password for $USER: "; then
+        echo
+        echo "${red}Wrong password, or this user may not make system changes.${off}"
+        FAILED=1
+        finish
+    fi
+    exec sudo "$0" "$@"
+fi
+
+if [ ! -r "$CONF" ]; then
+    echo "${red}$CONF was not found: nothing to set up.${off}"
+    echo "Create it from the example in the hexaOS sources (board/hexaos/setup.conf.example)."
+    FAILED=1
+    finish
+fi
+# shellcheck source=/dev/null
+. "$CONF"
+
+echo "${bold}hexaOS Setup${off}"
+for s in "${STEPS[@]}"; do
+    "step_$s"
+done
+finish

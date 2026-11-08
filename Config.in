@@ -1,6 +1,7 @@
 # hexaOS packages
 source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-wine/Config.in"
 source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-sof-bin/Config.in"
+source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-max98390/Config.in"
 source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-firefox/Config.in"
 source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-vscode/Config.in"
 source "$BR2_EXTERNAL_HEXAOS_PATH/package/hexa-dxvk/Config.in"

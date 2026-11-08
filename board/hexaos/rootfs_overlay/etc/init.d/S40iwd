@@ -1,0 +1,55 @@
+#!/bin/sh
+# iwd (Wi-Fi). Replaces Buildroot's script so that iwd's messages go to the
+# system log (/var/log/messages, tag "iwd") instead of nowhere: Settings and
+# hexa-setup read them to explain why a Wi-Fi connection failed.
+
+DAEMON="iwd"
+PIDFILE="/var/run/$DAEMON-log.pid"
+
+# -d: also log each step of a connection (scan, authentication, handshake)
+IWD_ARGS="-d"
+
+# shellcheck source=/dev/null
+[ -r "/etc/default/$DAEMON" ] && . "/etc/default/$DAEMON"
+
+start() {
+	printf 'Starting %s: ' "$DAEMON"
+	mkdir -p /tmp/iwd/hotspot
+	# The pidfile holds the shell that pipes iwd into logger
+	start-stop-daemon --start --background --make-pidfile \
+		--pidfile "$PIDFILE" --exec /bin/sh \
+		-- -c "/usr/libexec/$DAEMON $IWD_ARGS 2>&1 | logger -t $DAEMON"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+stop() {
+	printf 'Stopping %s: ' "$DAEMON"
+	# Stopping iwd closes the pipe, so logger and the shell exit too
+	start-stop-daemon --stop --quiet --exec "/usr/libexec/$DAEMON"
+	status=$?
+	rm -f "$PIDFILE"
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+case "$1" in
+	start|stop)
+		"$1";;
+	restart|reload)
+		stop
+		sleep 1
+		start;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac
