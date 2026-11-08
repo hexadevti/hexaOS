@@ -1,0 +1,9 @@
+config BR2_PACKAGE_HEXA_SETTINGS
+	bool "hexa-settings"
+	depends on BR2_PACKAGE_LIBGTK3
+	help
+	  The hexaOS Settings app: Wi-Fi and wired network, sound,
+	  display, wallpaper and taskbar, keyboard, mouse and touchpad,
+	  date and time, power, account, background services and
+	  information about the computer. System changes go through
+	  /usr/libexec/hexa-settings-helper, run with sudo.

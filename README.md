@@ -24,7 +24,7 @@ board/hexaos/art/                 logo and wallpaper (PostScript -> PNG with Gho
 board/hexaos/rootfs_overlay/      files copied into the system
   usr/sbin/hexa-session           starts the desktop on tty1
   usr/bin/hexa-dev                Ubuntu development container (Docker)
-  usr/bin/hexa-settings           Settings app (Start menu)
+  usr/bin/hexa-settings-tui       text-mode Settings (console fallback)
   usr/bin/hexa-setup              applies this machine's settings (Start menu)
   usr/bin/hexa-power              restart / shut down (Start menu)
   usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login)
@@ -86,7 +86,7 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Text login (root)          | Ctrl+Alt+F2 (root, no password) · back with Ctrl+Alt+F1 |
 | Boot menu                  | hold Esc during boot                                    |
 | Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key), shortcuts, open windows (click shows / minimizes, middle click closes), volume (wheel changes, click mutes), clock |
-| Settings                   | Start menu (or `hexa-settings`): Wi-Fi, wired network, sound, brightness, scale, keyboard layout, timezone, password, services, restart/shut down |
+| Settings                   | Start menu (or `hexa-settings`): network, sound, display, wallpaper and taskbar, keyboard, mouse and touchpad, date and time, power, account, services, about; `hexa-settings-tui` in text mode |
 | Setup (Wi-Fi network...)   | Start menu (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`; safe to run again |
 | Restart / shut down        | Start menu > Power (or `hexa-power`); no password needed |
 | Switch windows             | Alt+Tab (hold Alt, press Tab to move on, release Alt to pick); Super+Tab works too |
@@ -101,7 +101,7 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Windows games (DirectX)    | `hexa-dxvk install` once, then `wine game.exe`          |
 | Claude Code (first time)   | `curl -fsSL https://claude.ai/install.sh \| bash`, then `claude` |
 | Administrator              | `sudo command` (password of the hexa user)              |
-| Change password            | Settings > Password (or `sudo passwd hexa`)             |
+| Change password            | Settings > Account (or `sudo passwd hexa`)             |
 
 The "text mode" and "safe mode" boot menu entries help diagnose video problems.
 

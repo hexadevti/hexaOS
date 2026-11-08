@@ -39,6 +39,13 @@ if [ "$KEEP" = 1 ]; then
     # Persistent image: created once and reused. To start over, delete it.
     RUN_IMG="$OUT_DIR/images/disk-config.img"
     NEW=0; [ -f "$RUN_IMG" ] || NEW=1
+    # The VM writes to RUN_IMG, so its date says nothing; compare against the
+    # date of the build it was copied from (saved in a stamp file).
+    if [ "$NEW" = 0 ] && [ "$(stat -c %Y "$IMG")" != "$(cat "$RUN_IMG.src" 2>/dev/null)" ]; then
+        echo "WARNING: $RUN_IMG was made from an older build."
+        echo "         You are running the OLD system with your saved changes."
+        echo "         To use the new build: rm \"$RUN_IMG\" (this loses saved changes)."
+    fi
 else
     RUN_IMG="$OUT_DIR/images/disk-run.img"
     NEW=1
@@ -50,6 +57,7 @@ if [ "$NEW" = 1 ]; then
     chmod u+w "$RUN_IMG"   # the source may be a read-only frozen copy
     # Make the "SSD" bigger than the image (sparse: uses no extra space up front)
     truncate -s "$DISK_SIZE" "$RUN_IMG"
+    stat -c %Y "$IMG" > "$RUN_IMG.src"
 fi
 echo "VM disk: $RUN_IMG"
 

@@ -46,7 +46,7 @@ hx_wifi_diagnose() {
     for rf in /sys/class/rfkill/rfkill*; do
         [ "$(cat "$rf/type" 2>/dev/null)" = wlan ] || continue
         [ "$(cat "$rf/hard" 2>/dev/null)" = 1 ] && verdict="Wi-Fi is switched off by a hardware switch or the BIOS (rfkill hard block)."
-        [ "$(cat "$rf/soft" 2>/dev/null)" = 1 ] && verdict="Wi-Fi is turned off (rfkill soft block). Turn it on in Settings > Wi-Fi."
+        [ "$(cat "$rf/soft" 2>/dev/null)" = 1 ] && verdict="Wi-Fi is turned off (rfkill soft block). Turn it on in Settings > Network & internet."
     done
 
     if [ -z "$verdict" ]; then

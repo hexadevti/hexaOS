@@ -1,0 +1,91 @@
+#!/bin/bash
+# hexa-settings-helper: the system changes that hexaOS Settings makes as
+# administrator. Settings runs it through sudo, after asking for the user's
+# password. Only the commands below are accepted, and every argument is checked.
+#
+#   timezone ZONE             e.g. America/Sao_Paulo
+#   time-sync                 set the clock from the internet now
+#   hostname NAME             rename the computer
+#   password                  new password of the calling user (read from stdin)
+#   service docker|cups start|stop
+#   docker-boot on|off        start Docker when the computer starts
+#   wired-restart             reconnect the wired network
+#   brightness DEVICE VALUE   when /sys/class/backlight is not writable
+
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+die() { echo "$*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || die "hexa-settings-helper must run as root"
+
+verb=${1:-}
+shift || true
+
+case "$verb" in
+timezone)
+    zone=${1:-}
+    case "$zone" in ""|*..*|/*|*[!A-Za-z0-9_/+-]*) die "Invalid timezone: $zone" ;; esac
+    [ -f "/usr/share/zoneinfo/$zone" ] || die "Unknown timezone: $zone"
+    ln -sf "../usr/share/zoneinfo/$zone" /etc/localtime
+    echo "$zone" > /etc/timezone
+    ;;
+time-sync)
+    chronyc -a makestep >/dev/null || die "The time service (chrony) did not answer."
+    sleep 1
+    hwclock -w -u 2>/dev/null
+    chronyc -n tracking | grep -q "Leap status *: Normal" ||
+        die "The clock could not be synchronized yet: check the internet connection."
+    ;;
+hostname)
+    name=${1:-}
+    [[ $name =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] ||
+        die "A computer name has 1 to 63 letters, digits or hyphens (not at the start or end)."
+    echo "$name" > /etc/hostname
+    if grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+        sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$name/" /etc/hosts
+    else
+        printf '127.0.1.1\t%s\n' "$name" >> /etc/hosts
+    fi
+    hostname "$name"
+    ;;
+password)
+    user=${SUDO_USER:-}
+    [ -n "$user" ] && [ "$user" != root ] || die "Run from Settings (through sudo)."
+    IFS= read -r pass || true
+    [ -n "$pass" ] || die "The new password is empty."
+    # BusyBox passwd asks twice; as root it does not need the old password
+    out=$(printf '%s\n%s\n' "$pass" "$pass" | passwd "$user" 2>&1) || die "${out:-passwd failed}"
+    ;;
+service)
+    case "${1:-}" in
+        docker) script=/etc/init.d/dockerd ;;
+        cups)   script=/etc/init.d/S81cupsd ;;
+        *) die "Unknown service: ${1:-}" ;;
+    esac
+    case "${2:-}" in start|stop) ;; *) die "Unknown action: ${2:-}" ;; esac
+    [ -x "$script" ] || die "This service is not installed."
+    "$script" "$2"
+    ;;
+docker-boot)
+    [ -e /etc/init.d/dockerd ] || die "Docker is not installed."
+    case "${1:-}" in
+        on)  ln -sf dockerd /etc/init.d/S60dockerd ;;
+        off) rm -f /etc/init.d/S60dockerd ;;
+        *) die "Use on or off." ;;
+    esac
+    ;;
+wired-restart)
+    /etc/init.d/S41wired restart
+    ;;
+brightness)
+    dev=${1:-} value=${2:-}
+    case "$dev" in ""|*[!A-Za-z0-9_.:-]*) die "Invalid device: $dev" ;; esac
+    case "$value" in ""|*[!0-9]*) die "Invalid value: $value" ;; esac
+    [ -w "/sys/class/backlight/$dev/brightness" ] || die "No such screen: $dev"
+    echo "$value" > "/sys/class/backlight/$dev/brightness"
+    ;;
+*)
+    die "Unknown command: $verb"
+    ;;
+esac

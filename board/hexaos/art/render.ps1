@@ -17,5 +17,6 @@ try {
     & $gs ($common -replace "png16m", "pngalpha") "-g24x24" "-sOutputFile=$overlay\settings.png" "settings-icon.ps"
     & $gs ($common -replace "png16m", "pngalpha") "-g24x24" "-sOutputFile=$overlay\setup.png" "setup-icon.ps"
     & $gs ($common -replace "png16m", "pngalpha") "-g24x24" "-sOutputFile=$overlay\power.png" "power-icon.ps"
+    & $gs ($common -replace "png16m", "pngalpha") "-g24x24" "-sOutputFile=$overlay\taskmgr.png" "taskmgr-icon.ps"
 } finally { Pop-Location }
 Write-Output "ok: $overlay\wallpaper.png, $art\splash-logo.png"

@@ -1,0 +1,20 @@
+%!PS
+% 24x24 panel icon: hexaOS Task Manager (a pulse line over a graph)
+(common.ps) run
+gsave
+  12 12 11.5 hexpath clip
+  << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 24 24]
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [blue] /C1 [cyan] /N 1 >>
+     /Extend [true true] >> shfill
+grestore
+bg setrgbcolor
+1.8 setlinewidth 1 setlinejoin 1 setlinecap
+newpath
+  4.5 11 moveto
+  8.5 11 lineto
+  10.5 16.5 lineto
+  13.5 6.5 lineto
+  15.5 11 lineto
+  19.5 11 lineto
+stroke
+showpage

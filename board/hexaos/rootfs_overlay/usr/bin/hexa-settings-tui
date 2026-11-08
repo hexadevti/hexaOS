@@ -1,6 +1,7 @@
 #!/bin/bash
-# hexaOS Settings: menus for the most common settings.
-# Opened from the Start menu (Settings), or by typing "hexa-settings".
+# hexaOS Settings in text mode (menus), for the console or when the desktop
+# does not start: type "hexa-settings-tui". The desktop has the graphical
+# Settings app (hexa-settings).
 # Personal settings (Wi-Fi, sound, brightness, keyboard, display scale) need no
 # password; changes to the whole system ask for your password (sudo).
 

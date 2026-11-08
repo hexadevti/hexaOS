@@ -43,7 +43,7 @@ step_wifi() {
     fi
     W=$(hx_wifi_iface)
     if [ -z "$W" ]; then
-        fail "No Wi-Fi adapter was found (open Settings > Wi-Fi for details)."
+        fail "No Wi-Fi adapter was found (open Settings > Network & internet for details)."
         return
     fi
     if [ ${#WIFI_PASSWORD} -lt 8 ] || [ ${#WIFI_PASSWORD} -gt 63 ]; then

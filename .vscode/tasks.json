@@ -1,0 +1,43 @@
+{
+    // hexaOS tasks: run with Ctrl+Shift+P > "Tasks: Run Task".
+    // Everything runs inside WSL, in the project folder.
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "hexaOS: Run in QEMU",
+            "detail": "Boots the latest build in a QEMU window (changes are discarded)",
+            "type": "process",
+            "command": "wsl",
+            "args": ["--cd", "${workspaceFolder}", "--", "bash", "scripts/run-qemu.sh"],
+            "problemMatcher": [],
+            "presentation": { "panel": "dedicated", "clear": true },
+            "group": { "kind": "test", "isDefault": true }
+        },
+        {
+            "label": "hexaOS: Run in QEMU (keep changes)",
+            "detail": "Same, but keeps Wi-Fi, files and settings in disk-config.img between runs",
+            "type": "process",
+            "command": "wsl",
+            "args": ["--cd", "${workspaceFolder}", "--", "bash", "scripts/run-qemu.sh", "--keep"],
+            "problemMatcher": [],
+            "presentation": { "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "hexaOS: Build",
+            "detail": "Builds the system image (~/hexaos-build/images/disk.img)",
+            "type": "process",
+            "command": "wsl",
+            "args": ["--cd", "${workspaceFolder}", "--", "bash", "scripts/build.sh"],
+            "problemMatcher": [],
+            "presentation": { "panel": "dedicated", "clear": true },
+            "group": { "kind": "build", "isDefault": true }
+        },
+        {
+            "label": "hexaOS: Build and run",
+            "detail": "Builds, then boots the new image in QEMU",
+            "dependsOrder": "sequence",
+            "dependsOn": ["hexaOS: Build", "hexaOS: Run in QEMU"],
+            "problemMatcher": []
+        }
+    ]
+}

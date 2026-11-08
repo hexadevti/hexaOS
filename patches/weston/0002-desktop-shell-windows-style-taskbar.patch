@@ -8,14 +8,23 @@ Turns the Weston panel into a taskbar, as on Windows:
 - a button for each open window: click to show it, click again to
   minimize, middle click to close; "app-id=" in a launcher gives its icon
   to matching windows
+- right-click menus:
+  - window button: open a new window of the app, pin or unpin it,
+    Restore, Minimize, Maximize, Close window
+  - pinned shortcut: open, Unpin from taskbar
+  - Start button: Task Manager, Settings, Terminal, Shut down
+  - empty part of the taskbar: Task Manager, Show desktop
+  Pins changed this way are saved in ~/.config/hexaos/taskbar-pins
+- Ctrl+Shift+Esc opens the Task Manager (/usr/bin/hexa-taskmgr)
 - volume (PipeWire, via wpctl): wheel changes it, click mutes
 - clock with the date below ("clock-date-format" in [shell])
 
 The shell plugin tells the panel about top-level windows through new
 events in weston_desktop_shell version 2 (window, window_removed), and
-the panel activates, minimizes or closes them with new requests. The
-Start menu is a "popup" surface shown above windows and the panel,
-closed (popup_done) when the user clicks elsewhere.
+the panel activates, minimizes, maximizes or closes them with new
+requests. The Start menu and the context menus are "popup" surfaces
+shown above windows and the panel (one at a time), closed (popup_done)
+when the user clicks elsewhere.
 
 Tooltips (toytoolkit) open above the pointer when there is no room
 below, so they show on a bottom panel.
@@ -23,7 +32,7 @@ below, so they show on a bottom panel.
 Upstream-Status: Inappropriate [hexaOS specific]
 
 diff --git a/clients/desktop-shell.c b/clients/desktop-shell.c
-index e06613f..70d987f 100644
+index e06613f..2ccc43a 100644
 --- a/clients/desktop-shell.c
 +++ b/clients/desktop-shell.c
 @@ -28,6 +28,10 @@
@@ -37,7 +46,15 @@ index e06613f..70d987f 100644
  #include <fcntl.h>
  #include <unistd.h>
  #include <errno.h>
-@@ -59,6 +63,26 @@
+@@ -39,6 +43,7 @@
+ #include <ctype.h>
+ #include <time.h>
+ #include <assert.h>
++#include <sys/stat.h>
+ 
+ #include <wayland-client.h>
+ 
+@@ -59,6 +64,29 @@
  #define DEFAULT_CLOCK_FORMAT CLOCK_FORMAT_MINUTES
  #define DEFAULT_SPACING 10
  
@@ -55,6 +72,9 @@ index e06613f..70d987f 100644
 +#define MENU_ITEM_HEIGHT	40
 +#define MENU_PAD		8
 +#define VOLUME_POLL_SECONDS	5
++#define HEXA_TASKMGR		"/usr/bin/hexa-taskmgr"
++#define HEXA_TASKMGR_ID		"org.hexaos.TaskManager"
++#define HEXA_SETTINGS_ID	"org.hexaos.Settings"
 +
 +/* hexaOS palette (see board/hexaos/art/common.ps) */
 +#define HEXA_CYAN	0.133, 0.827, 0.933
@@ -64,7 +84,7 @@ index e06613f..70d987f 100644
  enum clock_format {
  	CLOCK_FORMAT_MINUTES,
  	CLOCK_FORMAT_SECONDS,
-@@ -67,9 +91,61 @@ enum clock_format {
+@@ -67,9 +95,98 @@ enum clock_format {
  	CLOCK_FORMAT_NONE
  };
  
@@ -119,6 +139,43 @@ index e06613f..70d987f 100644
 +	bool closing;
 +};
 +
++/* What a context menu (right click) entry does */
++enum ctx_action {
++	CTX_LAUNCH,		/* start ctx_entry::item (a new window) */
++	CTX_PIN,		/* pin ctx_entry::item to the taskbar */
++	CTX_UNPIN,
++	CTX_RESTORE,		/* window actions, on context_menu::window_id */
++	CTX_MINIMIZE,
++	CTX_MAXIMIZE,
++	CTX_CLOSE,
++	CTX_TASK_MANAGER,
++	CTX_SHOW_DESKTOP,
++};
++
++#define CTX_MAX_ENTRIES		12
++
++struct ctx_entry {
++	const char *label;
++	enum ctx_action action;
++	struct menu_item *item;	/* for CTX_LAUNCH, CTX_PIN, CTX_UNPIN */
++	bool enabled;
++	bool separator;		/* draw a line above this entry */
++	int y, height;		/* position in the menu */
++};
++
++/* The right-click menu of the taskbar */
++struct context_menu {
++	struct desktop *desktop;
++	struct window *window;
++	struct widget *widget;
++	int width, height;
++	int hover;		/* entry under the pointer, -1 for none */
++	bool closing;
++	uint32_t window_id;	/* window the menu is about, 0 for none */
++	struct ctx_entry entries[CTX_MAX_ENTRIES];
++	int count;
++};
++
  struct desktop {
  	struct display *display;
  	struct weston_desktop_shell *shell;
@@ -126,7 +183,7 @@ index e06613f..70d987f 100644
  	struct unlock_dialog *unlock_dialog;
  	struct task unlock_task;
  	struct wl_list outputs;
-@@ -77,6 +153,7 @@ struct desktop {
+@@ -77,6 +194,7 @@ struct desktop {
  	int want_panel;
  	enum weston_desktop_shell_panel_position panel_position;
  	enum clock_format clock_format;
@@ -134,7 +191,7 @@ index e06613f..70d987f 100644
  
  	struct window *grab_window;
  	struct widget *grab_widget;
-@@ -87,6 +164,13 @@ struct desktop {
+@@ -87,6 +205,15 @@ struct desktop {
  	enum cursor_type grab_cursor;
  
  	int painted;
@@ -143,12 +200,14 @@ index e06613f..70d987f 100644
 +	struct wl_list menu_items;
 +	struct wl_list windows;
 +	struct start_menu *menu;
-+	struct task menu_close_task;
++	struct context_menu *ctx;
++	struct task popup_close_task;
++	bool popup_close_pending;
 +	struct volume_state volume;
  };
  
  struct surface {
-@@ -101,11 +185,26 @@ struct output;
+@@ -101,11 +228,26 @@ struct output;
  struct panel {
  	struct surface base;
  
@@ -175,7 +234,7 @@ index e06613f..70d987f 100644
  	struct panel_clock *clock;
  	int painted;
  	enum weston_desktop_shell_panel_position panel_position;
-@@ -134,6 +233,7 @@ struct output {
+@@ -134,6 +276,7 @@ struct output {
  
  	int x;
  	int y;
@@ -183,7 +242,7 @@ index e06613f..70d987f 100644
  	struct panel *panel;
  	struct background *background;
  };
-@@ -141,21 +241,16 @@ struct output {
+@@ -141,21 +284,16 @@ struct output {
  struct panel_launcher {
  	struct widget *widget;
  	struct panel *panel;
@@ -207,7 +266,7 @@ index e06613f..70d987f 100644
  	time_t refresh_timer;
  };
  
-@@ -171,6 +266,12 @@ struct unlock_dialog {
+@@ -171,6 +309,23 @@ struct unlock_dialog {
  static void
  panel_add_launchers(struct panel *panel, struct desktop *desktop);
  
@@ -215,12 +274,23 @@ index e06613f..70d987f 100644
 +start_menu_toggle(struct panel *panel);
 +
 +static void
-+start_menu_close(struct desktop *desktop);
++popups_close(struct desktop *desktop);
++
++enum ctx_kind {
++	CTX_FOR_WINDOW,		/* a window button */
++	CTX_FOR_LAUNCHER,	/* a pinned shortcut */
++	CTX_FOR_START,		/* the Start button (Win+X menu on Windows) */
++	CTX_FOR_TASKBAR,	/* an empty part of the taskbar */
++};
++
++static void
++context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
++		  struct task_window *win, struct menu_item *item);
 +
  static void
  sigchild_handler(int s)
  {
-@@ -178,7 +279,7 @@ sigchild_handler(int s)
+@@ -178,7 +333,7 @@ sigchild_handler(int s)
  	pid_t pid;
  
  	while (pid = waitpid(-1, &status, WNOHANG), pid > 0)
@@ -229,7 +299,7 @@ index e06613f..70d987f 100644
  }
  
  static int
-@@ -212,8 +313,221 @@ check_desktop_ready(struct window *window)
+@@ -212,8 +367,221 @@ check_desktop_ready(struct window *window)
  	}
  }
  
@@ -452,7 +522,7 @@ index e06613f..70d987f 100644
  {
  	pid_t pid;
  
-@@ -229,70 +543,82 @@ panel_launcher_activate(struct panel_launcher *widget)
+@@ -229,70 +597,82 @@ panel_launcher_activate(struct panel_launcher *widget)
  	if (setsid() == -1)
  		exit(EXIT_FAILURE);
  
@@ -578,7 +648,7 @@ index e06613f..70d987f 100644
  static void
  panel_redraw_handler(struct widget *widget, void *data)
  {
-@@ -305,6 +631,15 @@ panel_redraw_handler(struct widget *widget, void *data)
+@@ -305,6 +685,15 @@ panel_redraw_handler(struct widget *widget, void *data)
  	set_hex_color(cr, panel->color);
  	cairo_paint(cr);
  
@@ -594,7 +664,7 @@ index e06613f..70d987f 100644
  	cairo_destroy(cr);
  	surface = window_get_surface(panel->window);
  	cairo_surface_destroy(surface);
-@@ -312,272 +647,1204 @@ panel_redraw_handler(struct widget *widget, void *data)
+@@ -312,272 +701,1826 @@ panel_redraw_handler(struct widget *widget, void *data)
  	check_desktop_ready(panel->window);
  }
  
@@ -607,20 +677,35 @@ index e06613f..70d987f 100644
 +		     enum wl_pointer_button_state state, void *data)
  {
 -	struct panel_launcher *launcher = data;
-+	struct panel *panel = data;
- 
+-
 -	launcher->focused = 1;
 -	widget_schedule_redraw(widget);
-+	/* a click on an empty part of the panel closes the Start menu */
-+	if (state == WL_POINTER_BUTTON_STATE_PRESSED)
-+		start_menu_close(panel->desktop);
-+}
- 
+-
 -	return CURSOR_LEFT_PTR;
++	struct panel *panel = data;
++	int32_t x, y;
++
++	/* a click on an empty part of the panel closes the Start menu;
++	 * a right click there opens the taskbar menu */
++	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
++		popups_close(panel->desktop);
++	} else if (button == BTN_RIGHT) {
++		input_get_position(input, &x, &y);
++		context_menu_open(panel, CTX_FOR_TASKBAR, x, NULL, NULL);
++	}
+ }
+ 
 +/* Draws the rounded hover/active background behind a panel button */
-+static void
+ static void
+-panel_launcher_leave_handler(struct widget *widget,
+-			     struct input *input, void *data)
 +draw_button_bg(cairo_t *cr, struct rectangle *a, double alpha)
-+{
+ {
+-	struct panel_launcher *launcher = data;
+-
+-	launcher->focused = 0;
+-	widget_destroy_tooltip(widget);
+-	widget_schedule_redraw(widget);
 +	if (alpha <= 0)
 +		return;
 +	path_rounded_rect(cr, a->x + 2, a->y + 3, a->width - 4, a->height - 6, 5);
@@ -633,22 +718,26 @@ index e06613f..70d987f 100644
 + */
 +
  static void
--panel_launcher_leave_handler(struct widget *widget,
--			     struct input *input, void *data)
+-panel_launcher_button_handler(struct widget *widget,
+-			      struct input *input, uint32_t time,
+-			      uint32_t button,
+-			      enum wl_pointer_button_state state, void *data)
 +panel_start_redraw_handler(struct widget *widget, void *data)
  {
--	struct panel_launcher *launcher = data;
+-	struct panel_launcher *launcher;
 +	struct panel *panel = data;
 +	struct rectangle a;
 +	cairo_t *cr;
 +	double alpha = 0;
  
--	launcher->focused = 0;
--	widget_destroy_tooltip(widget);
+-	launcher = widget_get_user_data(widget);
+-	widget_schedule_redraw(widget);
+-	if (state == WL_POINTER_BUTTON_STATE_RELEASED)
+-		panel_launcher_activate(launcher);
 +	widget_get_allocation(widget, &a);
 +	if (a.width == 0)
 +		return;
-+
+ 
 +	cr = widget_cairo_create(panel->widget);
 +	if (panel->desktop->menu && !panel->desktop->menu->closing)
 +		alpha = 0.16;
@@ -657,24 +746,30 @@ index e06613f..70d987f 100644
 +	draw_button_bg(cr, &a, alpha);
 +	draw_logo(cr, a.x + a.width / 2.0, a.y + a.height / 2.0, 11, 1.0);
 +	cairo_destroy(cr);
-+}
-+
+ }
+ 
+-static void
+-panel_launcher_touch_down_handler(struct widget *widget, struct input *input,
+-				  uint32_t serial, uint32_t time, int32_t id,
+-				  float x, float y, void *data)
 +static int
 +panel_start_enter_handler(struct widget *widget, struct input *input,
 +			  float x, float y, void *data)
-+{
+ {
+-	struct panel_launcher *launcher;
 +	struct panel *panel = data;
-+
+ 
+-	launcher = widget_get_user_data(widget);
+-	launcher->focused = 1;
 +	panel->start_hover = 1;
  	widget_schedule_redraw(widget);
 +	return CURSOR_LEFT_PTR;
  }
  
  static void
--panel_launcher_button_handler(struct widget *widget,
--			      struct input *input, uint32_t time,
--			      uint32_t button,
--			      enum wl_pointer_button_state state, void *data)
+-panel_launcher_touch_up_handler(struct widget *widget, struct input *input,
+-				uint32_t serial, uint32_t time, int32_t id,
+-				void *data)
 +panel_start_leave_handler(struct widget *widget, struct input *input,
 +			  void *data)
  {
@@ -682,56 +777,55 @@ index e06613f..70d987f 100644
 +	struct panel *panel = data;
  
 -	launcher = widget_get_user_data(widget);
+-	launcher->focused = 0;
 +	panel->start_hover = 0;
 +	widget_destroy_tooltip(widget);
  	widget_schedule_redraw(widget);
--	if (state == WL_POINTER_BUTTON_STATE_RELEASED)
--		panel_launcher_activate(launcher);
-+}
+-	panel_launcher_activate(launcher);
+ }
  
+-static void
+-panel_launcher_tablet_tool_proximity_in_handler(struct widget *widget,
+-						struct tablet_tool *tool,
+-						struct tablet *tablet, void *data)
 +static int
 +panel_start_motion_handler(struct widget *widget, struct input *input,
 +			   uint32_t time, float x, float y, void *data)
-+{
+ {
+-	struct panel_launcher *launcher;
+-
+-	launcher = widget_get_user_data(widget);
+-	launcher->focused = 1;
+-	widget_schedule_redraw(widget);
 +	widget_set_tooltip(widget, "Start", x, y);
 +	return CURSOR_LEFT_PTR;
  }
  
  static void
--panel_launcher_touch_down_handler(struct widget *widget, struct input *input,
--				  uint32_t serial, uint32_t time, int32_t id,
--				  float x, float y, void *data)
+-panel_launcher_tablet_tool_proximity_out_handler(struct widget *widget,
+-						 struct tablet_tool *tool, void *data)
 +panel_start_button_handler(struct widget *widget, struct input *input,
 +			   uint32_t time, uint32_t button,
 +			   enum wl_pointer_button_state state, void *data)
  {
 -	struct panel_launcher *launcher;
 +	struct panel *panel = data;
- 
--	launcher = widget_get_user_data(widget);
--	launcher->focused = 1;
--	widget_schedule_redraw(widget);
++
 +	widget_destroy_tooltip(widget);
 +	if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_PRESSED)
 +		start_menu_toggle(panel);
- }
- 
- static void
--panel_launcher_touch_up_handler(struct widget *widget, struct input *input,
--				uint32_t serial, uint32_t time, int32_t id,
--				void *data)
++	else if (button == BTN_RIGHT && state == WL_POINTER_BUTTON_STATE_RELEASED)
++		context_menu_open(panel, CTX_FOR_START, 0, NULL, NULL);
++}
++
++static void
 +panel_start_touch_down_handler(struct widget *widget, struct input *input,
 +			       uint32_t serial, uint32_t time, int32_t id,
 +			       float x, float y, void *data)
- {
--	struct panel_launcher *launcher;
++{
 +	start_menu_toggle(data);
 +}
- 
--	launcher = widget_get_user_data(widget);
--	launcher->focused = 0;
--	widget_schedule_redraw(widget);
--	panel_launcher_activate(launcher);
++
 +/*
 + * Pinned launchers
 + */
@@ -798,13 +892,22 @@ index e06613f..70d987f 100644
 +			      enum wl_pointer_button_state state, void *data)
 +{
 +	struct panel_launcher *launcher = data;
++	struct rectangle a;
 +
 +	widget_destroy_tooltip(widget);
-+	start_menu_close(launcher->panel->desktop);
-+	launcher->pressed = state == WL_POINTER_BUTTON_STATE_PRESSED;
++	popups_close(launcher->panel->desktop);
++	launcher->pressed = button == BTN_LEFT &&
++			    state == WL_POINTER_BUTTON_STATE_PRESSED;
 +	widget_schedule_redraw(widget);
-+	if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_RELEASED)
++	if (state != WL_POINTER_BUTTON_STATE_RELEASED)
++		return;
++	if (button == BTN_LEFT) {
 +		launch_item(launcher->item);
++	} else if (button == BTN_RIGHT) {
++		widget_get_allocation(widget, &a);
++		context_menu_open(launcher->panel, CTX_FOR_LAUNCHER, a.x,
++				  NULL, launcher->item);
++	}
 +}
 +
 +static void
@@ -824,10 +927,11 @@ index e06613f..70d987f 100644
 +				void *data)
 +{
 +	struct panel_launcher *launcher = data;
-+
-+	launcher->focused = 0;
-+	widget_schedule_redraw(widget);
-+	start_menu_close(launcher->panel->desktop);
+ 
+-	launcher = widget_get_user_data(widget);
+ 	launcher->focused = 0;
+ 	widget_schedule_redraw(widget);
++	popups_close(launcher->panel->desktop);
 +	launch_item(launcher->item);
 +}
 +
@@ -1044,7 +1148,7 @@ index e06613f..70d987f 100644
 +	struct desktop *desktop = panel->desktop;
 +	struct task_window *win = task_at_index(desktop, index);
 +
-+	start_menu_close(desktop);
++	popups_close(desktop);
 +	if (!win || desktop->shell_version < 2)
 +		return;
 +
@@ -1071,6 +1175,16 @@ index e06613f..70d987f 100644
 +		return;
 +
 +	input_get_position(input, &x, &y);
++	if (button == BTN_RIGHT) {
++		struct task_window *win =
++			task_at_index(panel->desktop, task_index_at(panel, x));
++
++		if (win)
++			context_menu_open(panel, CTX_FOR_WINDOW, x, win, NULL);
++		else
++			context_menu_open(panel, CTX_FOR_TASKBAR, x, NULL, NULL);
++		return;
++	}
 +	task_click(panel, task_index_at(panel, x), button);
 +}
 +
@@ -1185,8 +1299,14 @@ index e06613f..70d987f 100644
 +	vol->reader_task.run = volume_reader_func;
 +	display_watch_fd(vol->desktop->display, fds[0],
 +			 EPOLLIN | EPOLLHUP | EPOLLERR, &vol->reader_task);
-+}
-+
+ }
+ 
+-static void
+-panel_launcher_tablet_tool_up_handler(struct widget *widget,
+-				      struct tablet_tool *tool,
+-				      void *data)
+-{
+-	struct panel_launcher *launcher;
 +static void
 +volume_timer_func(struct toytimer *tt)
 +{
@@ -1325,7 +1445,7 @@ index e06613f..70d987f 100644
 +	struct panel *panel = data;
 +
 +	widget_destroy_tooltip(widget);
-+	start_menu_close(panel->desktop);
++	popups_close(panel->desktop);
 +	if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_RELEASED &&
 +	    panel->desktop->volume.available)
 +		volume_toggle_mute(&panel->desktop->volume);
@@ -1441,7 +1561,7 @@ index e06613f..70d987f 100644
 +
 +	widget_destroy_tooltip(widget);
 +	if (state == WL_POINTER_BUTTON_STATE_PRESSED)
-+		start_menu_close(clock->panel->desktop);
++		popups_close(clock->panel->desktop);
 +}
 +
 +static int
@@ -1624,98 +1744,63 @@ index e06613f..70d987f 100644
 +			 float x, float y, void *data)
 +{
 +	return start_menu_motion_handler(widget, input, 0, x, y, data);
- }
- 
- static void
--panel_launcher_tablet_tool_proximity_in_handler(struct widget *widget,
--						struct tablet_tool *tool,
--						struct tablet *tablet, void *data)
++}
++
++static void
 +start_menu_leave_handler(struct widget *widget, struct input *input,
 +			 void *data)
- {
--	struct panel_launcher *launcher;
++{
 +	struct start_menu *menu = data;
- 
--	launcher = widget_get_user_data(widget);
--	launcher->focused = 1;
++
 +	menu->hover = -1;
- 	widget_schedule_redraw(widget);
- }
- 
- static void
--panel_launcher_tablet_tool_proximity_out_handler(struct widget *widget,
--						 struct tablet_tool *tool, void *data)
++	widget_schedule_redraw(widget);
++}
++
++static void
 +start_menu_activate(struct start_menu *menu, int index)
- {
--	struct panel_launcher *launcher;
++{
 +	struct menu_item *item = menu_item_at_index(menu->desktop, index);
- 
--	launcher = widget_get_user_data(widget);
--	launcher->focused = 0;
--	widget_schedule_redraw(widget);
++
 +	if (!item)
 +		return;
 +	launch_item(item);
-+	start_menu_close(menu->desktop);
- }
- 
- static void
--panel_launcher_tablet_tool_up_handler(struct widget *widget,
--				      struct tablet_tool *tool,
--				      void *data)
++	popups_close(menu->desktop);
++}
++
++static void
 +start_menu_button_handler(struct widget *widget, struct input *input,
 +			  uint32_t time, uint32_t button,
 +			  enum wl_pointer_button_state state, void *data)
- {
--	struct panel_launcher *launcher;
++{
 +	struct start_menu *menu = data;
 +	int32_t x, y;
- 
--	launcher = widget_get_user_data(widget);
--	panel_launcher_activate(launcher);
++
 +	if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_RELEASED)
 +		return;
 +	input_get_position(input, &x, &y);
 +	start_menu_activate(menu, start_menu_index_at(menu, x, y));
- }
- 
- static void
--panel_launcher_tablet_tool_button_handler(struct widget *widget,
--					  struct tablet_tool *tool,
--					  uint32_t button,
--					  uint32_t state_w,
--					  void *data)
++}
++
++static void
 +start_menu_touch_down_handler(struct widget *widget, struct input *input,
 +			      uint32_t serial, uint32_t time, int32_t id,
 +			      float x, float y, void *data)
- {
--	struct panel_launcher *launcher;
--	enum zwp_tablet_tool_v2_button_state state = state_w;
++{
 +	struct start_menu *menu = data;
- 
--	launcher = widget_get_user_data(widget);
--
--	if (state == ZWP_TABLET_TOOL_V2_BUTTON_STATE_RELEASED)
--		panel_launcher_activate(launcher);
++
 +	start_menu_activate(menu, start_menu_index_at(menu, x, y));
- }
- 
--static int clock_timer_reset(struct panel_clock *clock);
--
- static void
--clock_func(struct toytimer *tt)
++}
++
++static void
 +start_menu_open(struct panel *panel)
- {
--	struct panel_clock *clock = container_of(tt, struct panel_clock, timer);
++{
 +	struct desktop *desktop = panel->desktop;
 +	struct start_menu *menu;
 +	int x, y, n;
- 
--	widget_schedule_redraw(clock->widget);
++
 +	if (desktop->shell_version < 2 || !panel->owner)
 +		return;
- 
--	clock_timer_reset(clock);
++
 +	n = wl_list_length(&desktop->menu_items);
 +	menu = xzalloc(sizeof *menu);
 +	menu->desktop = desktop;
@@ -1750,11 +1835,609 @@ index e06613f..70d987f 100644
 +
 +	desktop->menu = menu;
 +	panels_update(desktop);
++}
++
++static void
++start_menu_destroy(struct desktop *desktop)
++{
++	struct start_menu *menu = desktop->menu;
++
++	if (!menu)
++		return;
++	widget_destroy(menu->widget);
++	window_destroy(menu->window);
++	free(menu);
++	desktop->menu = NULL;
++}
++
++static void
++context_menu_destroy(struct desktop *desktop);
++
++static void
++popups_close_task(struct task *task, uint32_t events)
++{
++	struct desktop *desktop =
++		container_of(task, struct desktop, popup_close_task);
++
++	desktop->popup_close_pending = false;
++	if (desktop->menu && desktop->menu->closing)
++		start_menu_destroy(desktop);
++	if (desktop->ctx && desktop->ctx->closing)
++		context_menu_destroy(desktop);
++	panels_update(desktop);
++}
++
++/* Closes the open popup (Start menu or context menu) once the current
++ * input event has been handled: it may be the popup's own event */
++static void
++popups_close(struct desktop *desktop)
++{
++	bool any = false;
++
++	if (desktop->menu && !desktop->menu->closing) {
++		desktop->menu->closing = true;
++		any = true;
++	}
++	if (desktop->ctx && !desktop->ctx->closing) {
++		desktop->ctx->closing = true;
++		any = true;
++	}
++	if (any && !desktop->popup_close_pending) {
++		desktop->popup_close_pending = true;
++		display_defer(desktop->display, &desktop->popup_close_task);
++	}
++}
++
++/* Destroys open popups right away, before opening another one: the shell
++ * shows a single popup at a time. Never call this from a popup's handler. */
++static void
++popups_destroy_now(struct desktop *desktop)
++{
++	start_menu_destroy(desktop);
++	context_menu_destroy(desktop);
++}
++
++static void
++start_menu_toggle(struct panel *panel)
++{
++	if (panel->desktop->menu) {
++		popups_close(panel->desktop);
++	} else {
++		popups_destroy_now(panel->desktop);
++		start_menu_open(panel);
++	}
++}
++
++/*
++ * Context menus: right click on the taskbar
++ */
++
++#define CTX_WIDTH		240
++#define CTX_ITEM_HEIGHT		34
++#define CTX_SEP_HEIGHT		9
++
++static struct ctx_entry *
++context_menu_add(struct context_menu *ctx, const char *label,
++		 enum ctx_action action, struct menu_item *item, bool enabled)
++{
++	struct ctx_entry *e;
++
++	if (ctx->count >= CTX_MAX_ENTRIES)
++		return NULL;
++	e = &ctx->entries[ctx->count++];
++	e->label = label;
++	e->action = action;
++	e->item = item;
++	e->enabled = enabled;
++	return e;
++}
++
++static void
++context_menu_separator(struct context_menu *ctx)
++{
++	/* the separator goes above the next entry */
++	if (ctx->count > 0 && ctx->count < CTX_MAX_ENTRIES)
++		ctx->entries[ctx->count].separator = true;
++}
++
++static int
++context_menu_index_at(struct context_menu *ctx, float x, float y)
++{
++	int i;
++
++	if (x < MENU_PAD / 2 || x >= ctx->width - MENU_PAD / 2)
++		return -1;
++	for (i = 0; i < ctx->count; i++)
++		if (y >= ctx->entries[i].y &&
++		    y < ctx->entries[i].y + ctx->entries[i].height)
++			return ctx->entries[i].enabled ? i : -1;
++	return -1;
++}
++
++/* Small line-art glyphs for the window actions, in a size x size box */
++static void
++draw_action_glyph(cairo_t *cr, enum ctx_action action, double x, double y,
++		  double size)
++{
++	double m = size * 0.25;
++
++	cairo_save(cr);
++	cairo_set_line_width(cr, 1.5);
++	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
++	switch (action) {
++	case CTX_MINIMIZE:
++		cairo_move_to(cr, x + m, y + size / 2);
++		cairo_line_to(cr, x + size - m, y + size / 2);
++		break;
++	case CTX_MAXIMIZE:
++		cairo_rectangle(cr, x + m, y + m, size - 2 * m, size - 2 * m);
++		break;
++	case CTX_RESTORE:
++		cairo_rectangle(cr, x + m, y + m + 3, size - 2 * m - 3,
++				size - 2 * m - 3);
++		cairo_move_to(cr, x + m + 3, y + m + 3);
++		cairo_line_to(cr, x + m + 3, y + m);
++		cairo_line_to(cr, x + size - m, y + m);
++		cairo_line_to(cr, x + size - m, y + size - m - 3);
++		cairo_line_to(cr, x + size - m - 3, y + size - m - 3);
++		break;
++	case CTX_CLOSE:
++		cairo_move_to(cr, x + m, y + m);
++		cairo_line_to(cr, x + size - m, y + size - m);
++		cairo_move_to(cr, x + size - m, y + m);
++		cairo_line_to(cr, x + m, y + size - m);
++		break;
++	case CTX_PIN:
++	case CTX_UNPIN:
++		/* a push pin */
++		cairo_move_to(cr, x + size / 2 - 4, y + m);
++		cairo_line_to(cr, x + size / 2 + 4, y + m);
++		cairo_move_to(cr, x + size / 2 - 2.5, y + m);
++		cairo_line_to(cr, x + size / 2 - 2.5, y + size / 2);
++		cairo_move_to(cr, x + size / 2 + 2.5, y + m);
++		cairo_line_to(cr, x + size / 2 + 2.5, y + size / 2);
++		cairo_move_to(cr, x + size / 2 - 5, y + size / 2);
++		cairo_line_to(cr, x + size / 2 + 5, y + size / 2);
++		cairo_move_to(cr, x + size / 2, y + size / 2);
++		cairo_line_to(cr, x + size / 2, y + size - m + 2);
++		if (action == CTX_UNPIN) {
++			cairo_move_to(cr, x + m - 1, y + size - m + 1);
++			cairo_line_to(cr, x + size - m + 1, y + m - 1);
++		}
++		break;
++	case CTX_TASK_MANAGER:
++		/* a pulse line */
++		cairo_move_to(cr, x + m - 2, y + size / 2);
++		cairo_line_to(cr, x + size * 0.4, y + size / 2);
++		cairo_line_to(cr, x + size * 0.5, y + m);
++		cairo_line_to(cr, x + size * 0.6, y + size - m);
++		cairo_line_to(cr, x + size * 0.68, y + size / 2);
++		cairo_line_to(cr, x + size - m + 2, y + size / 2);
++		break;
++	case CTX_SHOW_DESKTOP:
++		cairo_rectangle(cr, x + m - 1, y + m, size - 2 * m + 2,
++				size - 2 * m - 2);
++		cairo_move_to(cr, x + size / 2, y + size - m - 2);
++		cairo_line_to(cr, x + size / 2, y + size - m + 1);
++		cairo_move_to(cr, x + size / 2 - 4, y + size - m + 1);
++		cairo_line_to(cr, x + size / 2 + 4, y + size - m + 1);
++		break;
++	default:
++		break;
++	}
++	cairo_stroke(cr);
++	cairo_restore(cr);
++}
++
++static void
++context_menu_redraw_handler(struct widget *widget, void *data)
++{
++	struct context_menu *ctx = data;
++	cairo_surface_t *surface;
++	cairo_t *cr;
++	int i;
++
++	cr = widget_cairo_create(widget);
++	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
++	cairo_set_source_rgba(cr, 0, 0, 0, 0);
++	cairo_paint(cr);
++	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
++
++	path_rounded_rect(cr, 0.5, 0.5, ctx->width - 1, ctx->height - 1, 8);
++	cairo_set_source_rgba(cr, 0.067, 0.098, 0.165, 0.97);
++	cairo_fill_preserve(cr);
++	cairo_set_source_rgba(cr, 1, 1, 1, 0.12);
++	cairo_set_line_width(cr, 1);
++	cairo_stroke(cr);
++
++	set_font(cr, 13.5, false);
++	for (i = 0; i < ctx->count; i++) {
++		struct ctx_entry *e = &ctx->entries[i];
++		double alpha = e->enabled ? 0.92 : 0.35;
++		double gx = MENU_PAD + 8;
++		double gy = e->y + (CTX_ITEM_HEIGHT - 20) / 2.0;
++
++		if (e->separator) {
++			cairo_set_source_rgba(cr, 1, 1, 1, 0.08);
++			cairo_rectangle(cr, MENU_PAD, e->y - CTX_SEP_HEIGHT / 2.0,
++					ctx->width - 2 * MENU_PAD, 1);
++			cairo_fill(cr);
++		}
++
++		if (i == ctx->hover) {
++			path_rounded_rect(cr, MENU_PAD / 2, e->y + 1,
++					  ctx->width - MENU_PAD,
++					  e->height - 2, 5);
++			cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
++			cairo_fill(cr);
++		}
++
++		if (e->action == CTX_LAUNCH && e->item) {
++			draw_icon(cr, e->item->icon, gx, gy, 20, 1.0);
++		} else {
++			cairo_set_source_rgba(cr, 1, 1, 1, alpha * 0.85);
++			draw_action_glyph(cr, e->action, gx, gy, 20);
++		}
++
++		cairo_set_source_rgba(cr, 1, 1, 1, alpha);
++		show_text_fit(cr, e->label, gx + 20 + 12,
++			      e->y + CTX_ITEM_HEIGHT / 2.0 + 4.5,
++			      ctx->width - gx - 20 - 12 - MENU_PAD);
++	}
++
++	cairo_destroy(cr);
++	surface = window_get_surface(ctx->window);
++	cairo_surface_destroy(surface);
++}
++
++static int
++context_menu_motion_handler(struct widget *widget, struct input *input,
++			    uint32_t time, float x, float y, void *data)
++{
++	struct context_menu *ctx = data;
++	int i = context_menu_index_at(ctx, x, y);
++
++	if (i != ctx->hover) {
++		ctx->hover = i;
++		widget_schedule_redraw(widget);
++	}
++	return CURSOR_LEFT_PTR;
++}
++
++static int
++context_menu_enter_handler(struct widget *widget, struct input *input,
++			   float x, float y, void *data)
++{
++	return context_menu_motion_handler(widget, input, 0, x, y, data);
++}
++
++static void
++context_menu_leave_handler(struct widget *widget, struct input *input,
++			   void *data)
++{
++	struct context_menu *ctx = data;
++
++	ctx->hover = -1;
++	widget_schedule_redraw(widget);
++}
++
++static void
++taskbar_pins_save(struct desktop *desktop);
++
++static void
++taskbar_pins_changed(struct desktop *desktop)
++{
++	struct output *output;
++	struct panel_launcher *launcher, *tmp;
++
++	taskbar_pins_save(desktop);
++	wl_list_for_each(output, &desktop->outputs, link) {
++		if (!output->panel)
++			continue;
++		wl_list_for_each_safe(launcher, tmp,
++				      &output->panel->launcher_list, link)
++			panel_destroy_launcher(launcher);
++		panel_add_launchers(output->panel, desktop);
++	}
++	panels_update(desktop);
++}
++
++/* Like Windows: bring an open Task Manager back (even when minimized)
++ * instead of starting a second one */
++static void
++task_manager_show(struct desktop *desktop)
++{
++	struct task_window *win;
++
++	if (desktop->shell_version >= 2) {
++		wl_list_for_each(win, &desktop->windows, link) {
++			if (win->app_id && strcmp(win->app_id, HEXA_TASKMGR_ID) == 0) {
++				weston_desktop_shell_window_activate(desktop->shell,
++								     win->id);
++				return;
++			}
++		}
++	}
++	run_command(HEXA_TASKMGR);
++}
++
++static void
++context_menu_activate(struct context_menu *ctx, int index)
++{
++	struct desktop *desktop = ctx->desktop;
++	struct task_window *win;
++	struct ctx_entry *e;
++	uint32_t id = ctx->window_id;
++
++	if (index < 0 || index >= ctx->count || !ctx->entries[index].enabled)
++		return;
++	e = &ctx->entries[index];
++	popups_close(desktop);
++
++	switch (e->action) {
++	case CTX_LAUNCH:
++		if (e->item)
++			launch_item(e->item);
++		break;
++	case CTX_PIN:
++	case CTX_UNPIN:
++		if (e->item) {
++			e->item->pinned = e->action == CTX_PIN;
++			taskbar_pins_changed(desktop);
++		}
++		break;
++	case CTX_RESTORE:
++		wl_list_for_each(win, &desktop->windows, link) {
++			if (win->id != id)
++				continue;
++			if (win->flags & WESTON_DESKTOP_SHELL_WINDOW_FLAGS_MINIMIZED)
++				weston_desktop_shell_window_activate(desktop->shell, id);
++			else
++				weston_desktop_shell_window_set_maximized(desktop->shell,
++									  id, 0);
++			break;
++		}
++		break;
++	case CTX_MINIMIZE:
++		weston_desktop_shell_window_minimize(desktop->shell, id);
++		break;
++	case CTX_MAXIMIZE:
++		weston_desktop_shell_window_set_maximized(desktop->shell, id, 1);
++		break;
++	case CTX_CLOSE:
++		weston_desktop_shell_window_close(desktop->shell, id);
++		break;
++	case CTX_TASK_MANAGER:
++		task_manager_show(desktop);
++		break;
++	case CTX_SHOW_DESKTOP:
++		wl_list_for_each(win, &desktop->windows, link)
++			if (!(win->flags &
++			      WESTON_DESKTOP_SHELL_WINDOW_FLAGS_MINIMIZED))
++				weston_desktop_shell_window_minimize(desktop->shell,
++								     win->id);
++		break;
++	}
++}
++
++static void
++context_menu_button_handler(struct widget *widget, struct input *input,
++			    uint32_t time, uint32_t button,
++			    enum wl_pointer_button_state state, void *data)
++{
++	struct context_menu *ctx = data;
++	int32_t x, y;
++
++	/* like on Windows, either button picks an entry */
++	if ((button != BTN_LEFT && button != BTN_RIGHT) ||
++	    state != WL_POINTER_BUTTON_STATE_RELEASED)
++		return;
++	input_get_position(input, &x, &y);
++	context_menu_activate(ctx, context_menu_index_at(ctx, x, y));
++}
++
++static void
++context_menu_touch_down_handler(struct widget *widget, struct input *input,
++				uint32_t serial, uint32_t time, int32_t id,
++				float x, float y, void *data)
++{
++	struct context_menu *ctx = data;
++
++	context_menu_activate(ctx, context_menu_index_at(ctx, x, y));
++}
++
++static void
++context_menu_fill(struct context_menu *ctx, enum ctx_kind kind,
++		  struct task_window *win, struct menu_item *item)
++{
++	struct desktop *desktop = ctx->desktop;
++	struct menu_item *it;
++
++	switch (kind) {
++	case CTX_FOR_WINDOW: {
++		bool minimized = win->flags &
++			WESTON_DESKTOP_SHELL_WINDOW_FLAGS_MINIMIZED;
++		bool maximized = win->flags &
++			WESTON_DESKTOP_SHELL_WINDOW_FLAGS_MAXIMIZED;
++
++		ctx->window_id = win->id;
++		item = item_for_app(desktop, win->app_id);
++		if (item) {
++			context_menu_add(ctx, item->name, CTX_LAUNCH, item, true);
++			if (item->pinned)
++				context_menu_add(ctx, "Unpin from taskbar",
++						 CTX_UNPIN, item, true);
++			else
++				context_menu_add(ctx, "Pin to taskbar",
++						 CTX_PIN, item, true);
++			context_menu_separator(ctx);
++		}
++		context_menu_add(ctx, "Restore", CTX_RESTORE, NULL,
++				 minimized || maximized);
++		context_menu_add(ctx, "Minimize", CTX_MINIMIZE, NULL,
++				 !minimized);
++		context_menu_add(ctx, "Maximize", CTX_MAXIMIZE, NULL,
++				 !maximized);
++		context_menu_separator(ctx);
++		context_menu_add(ctx, "Close window", CTX_CLOSE, NULL, true);
++		break;
++	}
++	case CTX_FOR_LAUNCHER:
++		context_menu_add(ctx, item->name, CTX_LAUNCH, item, true);
++		context_menu_add(ctx, "Unpin from taskbar", CTX_UNPIN, item,
++				 true);
++		break;
++	case CTX_FOR_START:
++		context_menu_add(ctx, "Task Manager", CTX_TASK_MANAGER, NULL,
++				 true);
++		it = item_for_app(desktop, HEXA_SETTINGS_ID);
++		if (it)
++			context_menu_add(ctx, it->name, CTX_LAUNCH, it, true);
++		it = item_for_app(desktop, "foot");
++		if (it)
++			context_menu_add(ctx, it->name, CTX_LAUNCH, it, true);
++		it = item_for_app(desktop, "hexa-power");
++		if (it) {
++			context_menu_separator(ctx);
++			context_menu_add(ctx, "Shut down or sign out",
++					 CTX_LAUNCH, it, true);
++		}
++		break;
++	case CTX_FOR_TASKBAR:
++		context_menu_add(ctx, "Task Manager", CTX_TASK_MANAGER, NULL,
++				 true);
++		context_menu_separator(ctx);
++		context_menu_add(ctx, "Show desktop", CTX_SHOW_DESKTOP, NULL,
++				 !wl_list_empty(&desktop->windows));
++		break;
++	}
++}
++
++static void
++context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
++		  struct task_window *win, struct menu_item *item)
++{
++	struct desktop *desktop = panel->desktop;
++	struct context_menu *ctx;
++	int px, py, i, y;
++
++	if (desktop->shell_version < 2 || !panel->owner)
++		return;
++	if ((kind == CTX_FOR_WINDOW && !win) ||
++	    (kind == CTX_FOR_LAUNCHER && !item))
++		return;
++
++	popups_destroy_now(desktop);
++
++	ctx = xzalloc(sizeof *ctx);
++	ctx->desktop = desktop;
++	ctx->hover = -1;
++	ctx->width = CTX_WIDTH;
++	context_menu_fill(ctx, kind, win, item);
++	if (ctx->count == 0) {
++		free(ctx);
++		return;
++	}
++
++	y = MENU_PAD / 2;
++	for (i = 0; i < ctx->count; i++) {
++		if (ctx->entries[i].separator)
++			y += CTX_SEP_HEIGHT;
++		ctx->entries[i].y = y;
++		ctx->entries[i].height = CTX_ITEM_HEIGHT;
++		y += CTX_ITEM_HEIGHT;
++	}
++	ctx->height = y + MENU_PAD / 2;
++
++	ctx->window = window_create_custom(desktop->display);
++	ctx->widget = window_add_widget(ctx->window, ctx);
++	window_set_title(ctx->window, "Menu");
++	widget_set_redraw_handler(ctx->widget, context_menu_redraw_handler);
++	widget_set_enter_handler(ctx->widget, context_menu_enter_handler);
++	widget_set_motion_handler(ctx->widget, context_menu_motion_handler);
++	widget_set_leave_handler(ctx->widget, context_menu_leave_handler);
++	widget_set_button_handler(ctx->widget, context_menu_button_handler);
++	widget_set_touch_down_handler(ctx->widget,
++				      context_menu_touch_down_handler);
++	window_set_buffer_scale(ctx->window, panel->owner->scale);
++
++	/* above the panel, starting at the click and kept on screen */
++	px = (int) x;
++	if (px + ctx->width > panel->output_width - MENU_PAD)
++		px = panel->output_width - MENU_PAD - ctx->width;
++	if (px < MENU_PAD)
++		px = MENU_PAD;
++	if (panel->panel_position == WESTON_DESKTOP_SHELL_PANEL_POSITION_TOP)
++		py = panel->height + MENU_PAD / 2;
++	else
++		py = panel->output_height - panel->height - ctx->height -
++		     MENU_PAD / 2;
++	if (py < 0)
++		py = 0;
++
++	weston_desktop_shell_set_popup(desktop->shell, panel->owner->output,
++				       window_get_wl_surface(ctx->window),
++				       px, py);
++	window_schedule_resize(ctx->window, ctx->width, ctx->height);
+ 
+-	launcher = widget_get_user_data(widget);
+-	panel_launcher_activate(launcher);
++	desktop->ctx = ctx;
++	panels_update(desktop);
+ }
+ 
+ static void
+-panel_launcher_tablet_tool_button_handler(struct widget *widget,
+-					  struct tablet_tool *tool,
+-					  uint32_t button,
+-					  uint32_t state_w,
+-					  void *data)
++context_menu_destroy(struct desktop *desktop)
+ {
+-	struct panel_launcher *launcher;
+-	enum zwp_tablet_tool_v2_button_state state = state_w;
++	struct context_menu *ctx = desktop->ctx;
+ 
+-	launcher = widget_get_user_data(widget);
+-
+-	if (state == ZWP_TABLET_TOOL_V2_BUTTON_STATE_RELEASED)
+-		panel_launcher_activate(launcher);
++	if (!ctx)
++		return;
++	widget_destroy(ctx->widget);
++	window_destroy(ctx->window);
++	free(ctx);
++	desktop->ctx = NULL;
+ }
+ 
+-static int clock_timer_reset(struct panel_clock *clock);
++/*
++ * Taskbar pins, kept in ~/.config/hexaos/taskbar-pins (one launcher name
++ * per line). Without that file, the "pinned" keys of weston.ini apply.
++ */
+ 
+-static void
+-clock_func(struct toytimer *tt)
++static char *
++taskbar_pins_path(void)
+ {
+-	struct panel_clock *clock = container_of(tt, struct panel_clock, timer);
+-
+-	widget_schedule_redraw(clock->widget);
++	const char *home = getenv("HOME");
++	char *path;
+ 
+-	clock_timer_reset(clock);
++	if (!home || !home[0])
++		return NULL;
++	if (asprintf(&path, "%s/.config/hexaos/taskbar-pins", home) < 0)
++		return NULL;
++	return path;
  }
  
  static void
 -panel_clock_redraw_handler(struct widget *widget, void *data)
-+start_menu_destroy(struct desktop *desktop)
++taskbar_pins_load(struct desktop *desktop)
  {
 -	struct panel_clock *clock = data;
 -	cairo_t *cr;
@@ -1763,17 +2446,24 @@ index e06613f..70d987f 100644
 -	time_t rawtime;
 -	struct tm * timeinfo;
 -	char string[128];
-+	struct start_menu *menu = desktop->menu;
- 
+-
 -	time(&rawtime);
 -	timeinfo = localtime(&rawtime);
 -	strftime(string, sizeof string, clock->format_string, timeinfo);
--
++	struct menu_item *item;
++	char *path = taskbar_pins_path();
++	char line[256];
++	FILE *f;
+ 
 -	widget_get_allocation(widget, &allocation);
 -	if (allocation.width == 0)
-+	if (!menu)
++	if (!path)
++		return;
++	f = fopen(path, "r");
++	free(path);
++	if (!f)
  		return;
--
+ 
 -	cr = widget_cairo_create(clock->panel->widget);
 -	cairo_set_font_size(cr, 14);
 -	cairo_text_extents(cr, string, &extents);
@@ -1791,16 +2481,21 @@ index e06613f..70d987f 100644
 -	cairo_set_source_rgba(cr, 1, 1, 1, 0.85);
 -	cairo_show_text(cr, string);
 -	cairo_destroy(cr);
-+	widget_destroy(menu->widget);
-+	window_destroy(menu->window);
-+	free(menu);
-+	desktop->menu = NULL;
++	wl_list_for_each(item, &desktop->menu_items, link)
++		item->pinned = false;
++	while (fgets(line, sizeof line, f)) {
++		line[strcspn(line, "\r\n")] = '\0';
++		wl_list_for_each(item, &desktop->menu_items, link)
++			if (strcmp(item->name, line) == 0)
++				item->pinned = true;
++	}
++	fclose(f);
  }
  
 -static int
 -clock_timer_reset(struct panel_clock *clock)
 +static void
-+start_menu_close_task(struct task *task, uint32_t events)
++taskbar_pins_save(struct desktop *desktop)
  {
 -	struct itimerspec its;
 -	struct timespec ts;
@@ -1808,47 +2503,55 @@ index e06613f..70d987f 100644
 -
 -	clock_gettime(CLOCK_REALTIME, &ts);
 -	tm = localtime(&ts.tv_sec);
-+	struct desktop *desktop =
-+		container_of(task, struct desktop, menu_close_task);
- 
+-
 -	its.it_interval.tv_sec = 0;
 -	its.it_interval.tv_nsec = 0;
 -	its.it_value.tv_sec = clock->refresh_timer - tm->tm_sec % clock->refresh_timer;
 -	its.it_value.tv_nsec = 10000000; /* 10 ms late to ensure the clock digit has actually changed */
 -	timespec_add_nsec(&its.it_value, &its.it_value, -ts.tv_nsec);
-+	start_menu_destroy(desktop);
-+	panels_update(desktop);
-+}
++	struct menu_item *item;
++	char *path = taskbar_pins_path();
++	char *slash, *parent;
++	FILE *f;
  
 -	toytimer_arm(&clock->timer, &its);
 -	return 0;
-+/* Closes the menu once the current input event has been handled */
-+static void
-+start_menu_close(struct desktop *desktop)
-+{
-+	if (!desktop->menu || desktop->menu->closing)
++	if (!path)
 +		return;
-+	desktop->menu->closing = true;
-+	display_defer(desktop->display, &desktop->menu_close_task);
++	/* create ~/.config and ~/.config/hexaos */
++	slash = strrchr(path, '/');
++	*slash = '\0';
++	parent = strrchr(path, '/');
++	*parent = '\0';
++	mkdir(path, 0755);
++	*parent = '/';
++	mkdir(path, 0755);
++	*slash = '/';
++
++	f = fopen(path, "w");
++	if (!f) {
++		fprintf(stderr, "cannot save %s: %s\n", path, strerror(errno));
++		free(path);
++		return;
++	}
++	wl_list_for_each(item, &desktop->menu_items, link)
++		if (item->pinned)
++			fprintf(f, "%s\n", item->name);
++	fclose(f);
++	free(path);
  }
  
- static void
+-static void
 -panel_destroy_clock(struct panel_clock *clock)
-+start_menu_toggle(struct panel *panel)
- {
+-{
 -	widget_destroy(clock->widget);
 -	toytimer_fini(&clock->timer);
 -	free(clock);
-+	if (panel->desktop->menu)
-+		start_menu_close(panel->desktop);
-+	else
-+		start_menu_open(panel);
- }
- 
+-}
 +/*
 + * Panel layout and life cycle
 + */
-+
+ 
  static void
 -panel_add_clock(struct panel *panel)
 +panel_layout(struct panel *panel)
@@ -1950,7 +2653,7 @@ index e06613f..70d987f 100644
 -	int horizontal = panel->panel_position == WESTON_DESKTOP_SHELL_PANEL_POSITION_TOP || panel->panel_position == WESTON_DESKTOP_SHELL_PANEL_POSITION_BOTTOM;
 -	int first_pad_h = horizontal ? 0 : DEFAULT_SPACING / 2;
 -	int first_pad_w = horizontal ? DEFAULT_SPACING / 2 : 0;
--
+ 
 -	wl_list_for_each(launcher, &panel->launcher_list, link) {
 -		widget_set_allocation(launcher->widget, x, y,
 -				      w + first_pad_w + 1, h + first_pad_h + 1);
@@ -1970,7 +2673,7 @@ index e06613f..70d987f 100644
 -		x = width - w;
 -	else
 -		y = height - (h = DEFAULT_SPACING * 3);
- 
+-
 -	if (panel->clock)
 -		widget_set_allocation(panel->clock->widget,
 -				      x, y, w + 1, h + 1);
@@ -1980,7 +2683,7 @@ index e06613f..70d987f 100644
  }
  
  static void
-@@ -602,47 +1869,23 @@ panel_configure(void *data,
+@@ -602,47 +2545,23 @@ panel_configure(void *data,
  		return;
  	}
  
@@ -2034,7 +2737,7 @@ index e06613f..70d987f 100644
  static void
  panel_destroy(struct panel *panel)
  {
-@@ -655,6 +1898,9 @@ panel_destroy(struct panel *panel)
+@@ -655,6 +2574,9 @@ panel_destroy(struct panel *panel)
  	wl_list_for_each_safe(launcher, tmp, &panel->launcher_list, link)
  		panel_destroy_launcher(launcher);
  
@@ -2044,7 +2747,7 @@ index e06613f..70d987f 100644
  	widget_destroy(panel->widget);
  	window_destroy(panel->window);
  
-@@ -669,8 +1915,11 @@ panel_create(struct desktop *desktop, struct output *output)
+@@ -669,8 +2591,11 @@ panel_create(struct desktop *desktop, struct output *output)
  
  	panel = xzalloc(sizeof *panel);
  
@@ -2056,7 +2759,7 @@ index e06613f..70d987f 100644
  	panel->window = window_create_custom(desktop->display);
  	panel->widget = window_add_widget(panel->window, panel);
  	wl_list_init(&panel->launcher_list);
-@@ -680,9 +1929,46 @@ panel_create(struct desktop *desktop, struct output *output)
+@@ -680,9 +2605,46 @@ panel_create(struct desktop *desktop, struct output *output)
  
  	widget_set_redraw_handler(panel->widget, panel_redraw_handler);
  	widget_set_resize_handler(panel->widget, panel_resize_handler);
@@ -2103,7 +2806,7 @@ index e06613f..70d987f 100644
  	if (panel->clock_format != CLOCK_FORMAT_NONE)
  		panel_add_clock(panel);
  
-@@ -690,90 +1976,9 @@ panel_create(struct desktop *desktop, struct output *output)
+@@ -690,90 +2652,9 @@ panel_create(struct desktop *desktop, struct output *output)
  	weston_config_section_get_color(s, "panel-color",
  					&panel->color, 0xaa000000);
  
@@ -2194,7 +2897,7 @@ index e06613f..70d987f 100644
  enum {
  	BACKGROUND_SCALE,
  	BACKGROUND_SCALE_CROP,
-@@ -1153,10 +2358,94 @@ desktop_shell_grab_cursor(void *data,
+@@ -1153,10 +3034,104 @@ desktop_shell_grab_cursor(void *data,
  	}
  }
  
@@ -2256,7 +2959,7 @@ index e06613f..70d987f 100644
 +static void
 +desktop_shell_popup_done(void *data, struct weston_desktop_shell *desktop_shell)
 +{
-+	start_menu_close(data);
++	popups_close(data);
 +}
 +
 +static void
@@ -2266,16 +2969,25 @@ index e06613f..70d987f 100644
 +	struct output *output;
 +
 +	if (desktop->menu) {
-+		start_menu_close(desktop);
++		popups_close(desktop);
 +		return;
 +	}
 +	/* open it on the first panel */
 +	wl_list_for_each_reverse(output, &desktop->outputs, link) {
 +		if (output->panel) {
++			popups_destroy_now(desktop);
 +			start_menu_open(output->panel);
 +			return;
 +		}
 +	}
++}
++
++static void
++desktop_shell_task_manager_key(void *data,
++			       struct weston_desktop_shell *desktop_shell)
++{
++	popups_close(data);
++	task_manager_show(data);
 +}
 +
  static const struct weston_desktop_shell_listener listener = {
@@ -2289,10 +3001,11 @@ index e06613f..70d987f 100644
 +	.window_removed = desktop_shell_window_removed,
 +	.popup_done = desktop_shell_popup_done,
 +	.menu_key = desktop_shell_menu_key,
++	.task_manager_key = desktop_shell_task_manager_key,
  };
  
  static void
-@@ -1322,6 +2611,7 @@ output_handle_scale(void *data,
+@@ -1322,6 +3297,7 @@ output_handle_scale(void *data,
  {
  	struct output *output = data;
  
@@ -2300,7 +3013,7 @@ index e06613f..70d987f 100644
  	if (output->panel)
  		window_set_buffer_scale(output->panel->window, scale);
  	if (output->background)
-@@ -1365,6 +2655,7 @@ create_output(struct desktop *desktop, uint32_t id)
+@@ -1365,6 +3341,7 @@ create_output(struct desktop *desktop, uint32_t id)
  	output->output =
  		display_bind(desktop->display, id, &wl_output_interface, 2);
  	output->server_output_id = id;
@@ -2308,7 +3021,7 @@ index e06613f..70d987f 100644
  
  	wl_output_add_listener(output->output, &output_listener, output);
  
-@@ -1437,10 +2728,11 @@ global_handler(struct display *display, uint32_t id,
+@@ -1437,10 +3414,11 @@ global_handler(struct display *display, uint32_t id,
  	struct desktop *desktop = data;
  
  	if (!strcmp(interface, "weston_desktop_shell")) {
@@ -2321,7 +3034,7 @@ index e06613f..70d987f 100644
  		weston_desktop_shell_add_listener(desktop->shell,
  						  &listener,
  						  desktop);
-@@ -1467,14 +2759,40 @@ global_handler_remove(struct display *display, uint32_t id,
+@@ -1467,14 +3445,40 @@ global_handler_remove(struct display *display, uint32_t id,
  }
  
  static void
@@ -2366,7 +3079,7 @@ index e06613f..70d987f 100644
  	s = NULL;
  	while (weston_config_next_section(desktop->config, &s, &name)) {
  		if (strcmp(name, "launcher") != 0)
-@@ -1483,12 +2801,17 @@ panel_add_launchers(struct panel *panel, struct desktop *desktop)
+@@ -1483,12 +3487,17 @@ panel_add_launchers(struct panel *panel, struct desktop *desktop)
  		weston_config_section_get_string(s, "icon", &icon, NULL);
  		weston_config_section_get_string(s, "path", &path, NULL);
  		weston_config_section_get_string(s, "displayname", &displayname, NULL);
@@ -2388,7 +3101,7 @@ index e06613f..70d987f 100644
  		} else {
  			fprintf(stderr, "invalid launcher section\n");
  		}
-@@ -1496,20 +2819,45 @@ panel_add_launchers(struct panel *panel, struct desktop *desktop)
+@@ -1496,20 +3505,45 @@ panel_add_launchers(struct panel *panel, struct desktop *desktop)
  		free(icon);
  		free(path);
  		free(displayname);
@@ -2441,11 +3154,11 @@ index e06613f..70d987f 100644
  static void
  parse_panel_position(struct desktop *desktop, struct weston_config_section *s)
  {
-@@ -1564,14 +2912,22 @@ int main(int argc, char *argv[])
+@@ -1564,12 +3598,19 @@ int main(int argc, char *argv[])
  	const char *config_file;
  
  	desktop.unlock_task.run = unlock_dialog_finish;
-+	desktop.menu_close_task.run = start_menu_close_task;
++	desktop.popup_close_task.run = popups_close_task;
  	wl_list_init(&desktop.outputs);
 +	wl_list_init(&desktop.menu_items);
 +	wl_list_init(&desktop.windows);
@@ -2460,15 +3173,17 @@ index e06613f..70d987f 100644
 +					 &desktop.date_format, "%d/%m/%Y");
  	parse_panel_position(&desktop, s);
  	parse_clock_format(&desktop, s);
-+	load_menu_items(&desktop);
  
- 	desktop.display = display_create(&argc, argv);
- 	if (desktop.display == NULL) {
-@@ -1582,6 +2938,18 @@ int main(int argc, char *argv[])
+@@ -1582,6 +3623,23 @@ int main(int argc, char *argv[])
  	}
  
  	display_set_user_data(desktop.display, &desktop);
 +
++	/* Load launchers only after connecting: display_create() consumes
++	 * WAYLAND_SOCKET, and each launcher snapshots the environment. Doing
++	 * this earlier leaks a stale WAYLAND_SOCKET to every launched app. */
++	load_menu_items(&desktop);
++	taskbar_pins_load(&desktop);
 +	/* Volume: read now and every few seconds (changes from other apps) */
 +	volume_read(&desktop.volume);
 +	toytimer_init(&desktop.volume.timer, CLOCK_MONOTONIC, desktop.display,
@@ -2483,11 +3198,12 @@ index e06613f..70d987f 100644
  	display_set_global_handler(desktop.display, global_handler);
  	display_set_global_handler_remove(desktop.display, global_handler_remove);
  
-@@ -1600,8 +2968,22 @@ int main(int argc, char *argv[])
+@@ -1600,8 +3658,23 @@ int main(int argc, char *argv[])
  	display_run(desktop.display);
  
  	/* Cleanup */
 +	start_menu_destroy(&desktop);
++	context_menu_destroy(&desktop);
 +	toytimer_fini(&desktop.volume.timer);
 +	if (desktop.volume.reader_pid > 0) {
 +		kill(desktop.volume.reader_pid, SIGKILL);
@@ -2544,7 +3260,7 @@ index 106742e..7f785d1 100644
  	return 0;
  }
 diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
-index 4f4402a..fbae860 100644
+index 4f4402a..22d0f28 100644
 --- a/desktop-shell/shell.c
 +++ b/desktop-shell/shell.c
 @@ -145,6 +145,15 @@ struct shell_surface {
@@ -2643,7 +3359,7 @@ index 4f4402a..fbae860 100644
  {
  	struct shell_surface *shsurf =
  		weston_desktop_surface_get_user_data(desktop_surface);
-@@ -3109,6 +3153,322 @@ desktop_shell_set_panel_position(struct wl_client *client,
+@@ -3109,6 +3153,351 @@ desktop_shell_set_panel_position(struct wl_client *client,
  	shell->panel_position = position;
  }
  
@@ -2720,6 +3436,8 @@ index 4f4402a..fbae860 100644
 +		flags |= WESTON_DESKTOP_SHELL_WINDOW_FLAGS_ACTIVATED;
 +	if (shsurf->view->layer_link.layer == &shell->minimized_layer)
 +		flags |= WESTON_DESKTOP_SHELL_WINDOW_FLAGS_MINIMIZED;
++	if (weston_desktop_surface_get_maximized(shsurf->desktop_surface))
++		flags |= WESTON_DESKTOP_SHELL_WINDOW_FLAGS_MAXIMIZED;
 +
 +	if (shsurf->tb.shown && shsurf->tb.flags == flags &&
 +	    str_equal(shsurf->tb.title, title) &&
@@ -2825,6 +3543,22 @@ index 4f4402a..fbae860 100644
 +		return;
 +
 +	weston_desktop_surface_close(shsurf->desktop_surface);
++}
++
++static void
++desktop_shell_window_set_maximized(struct wl_client *client,
++				   struct wl_resource *resource, uint32_t id,
++				   uint32_t maximized)
++{
++	struct desktop_shell *shell = wl_resource_get_user_data(resource);
++	struct shell_surface *shsurf = taskbar_find(shell, id);
++
++	if (!shsurf || shell->locked)
++		return;
++
++	/* the client resizes and commits; the taskbar hears about it then */
++	set_maximized(shsurf, maximized != 0);
++	desktop_shell_window_activate(client, resource, id);
 +}
 +
 +/* Start menu popup: a surface shown above windows and the panel */
@@ -2963,10 +3697,21 @@ index 4f4402a..fbae860 100644
 +		weston_desktop_shell_send_menu_key(res);
 +}
 +
++static void
++task_manager_binding(struct weston_keyboard *keyboard,
++		     const struct timespec *time, uint32_t key, void *data)
++{
++	struct desktop_shell *shell = data;
++	struct wl_resource *res = taskbar_resource(shell);
++
++	if (res && !shell->locked)
++		weston_desktop_shell_send_task_manager_key(res);
++}
++
  static const struct weston_desktop_shell_interface desktop_shell_implementation = {
  	desktop_shell_set_background,
  	desktop_shell_set_panel,
-@@ -3116,7 +3476,11 @@ static const struct weston_desktop_shell_interface desktop_shell_implementation
+@@ -3116,7 +3505,12 @@ static const struct weston_desktop_shell_interface desktop_shell_implementation
  	desktop_shell_unlock,
  	desktop_shell_set_grab_surface,
  	desktop_shell_desktop_ready,
@@ -2975,11 +3720,12 @@ index 4f4402a..fbae860 100644
 +	desktop_shell_window_activate,
 +	desktop_shell_window_minimize,
 +	desktop_shell_window_close,
-+	desktop_shell_set_popup
++	desktop_shell_set_popup,
++	desktop_shell_window_set_maximized
  };
  
  static void
-@@ -3661,6 +4025,8 @@ activate(struct desktop_shell *shell, struct weston_view *view,
+@@ -3661,6 +4055,8 @@ activate(struct desktop_shell *shell, struct weston_view *view,
  		ws = get_current_workspace(shell);
  		animate_focus_change(shell, ws, get_default_view(old_es), get_default_view(es));
  	}
@@ -2988,7 +3734,7 @@ index 4f4402a..fbae860 100644
  }
  
  static void
-@@ -3692,6 +4058,7 @@ click_to_activate_binding(struct weston_pointer *pointer,
+@@ -3692,6 +4088,7 @@ click_to_activate_binding(struct weston_pointer *pointer,
  {
  	if (pointer->grab != &pointer->default_grab)
  		return;
@@ -2996,7 +3742,7 @@ index 4f4402a..fbae860 100644
  	if (pointer->focus == NULL)
  		return;
  
-@@ -3707,6 +4074,7 @@ touch_to_activate_binding(struct weston_touch *touch,
+@@ -3707,6 +4104,7 @@ touch_to_activate_binding(struct weston_touch *touch,
  {
  	if (touch->grab != &touch->default_grab)
  		return;
@@ -3004,7 +3750,7 @@ index 4f4402a..fbae860 100644
  	if (touch->focus == NULL)
  		return;
  
-@@ -4218,13 +4586,14 @@ bind_desktop_shell(struct wl_client *client,
+@@ -4218,13 +4616,14 @@ bind_desktop_shell(struct wl_client *client,
  	struct wl_resource *resource;
  
  	resource = wl_resource_create(client, &weston_desktop_shell_interface,
@@ -3020,17 +3766,21 @@ index 4f4402a..fbae860 100644
  		return;
  	}
  
-@@ -4867,6 +5236,9 @@ shell_add_bindings(struct weston_compositor *ec, struct desktop_shell *shell)
+@@ -4867,6 +5266,13 @@ shell_add_bindings(struct weston_compositor *ec, struct desktop_shell *shell)
  
  	weston_compositor_add_key_binding(ec, KEY_TAB, mod, switcher_binding,
  					  shell);
 +	/* hexaOS: the Super key alone opens the Start menu */
 +	weston_compositor_add_modifier_binding(ec, MODIFIER_SUPER,
 +					       menu_key_binding, shell);
++	/* hexaOS: Ctrl+Shift+Esc opens the Task Manager, as on Windows */
++	weston_compositor_add_key_binding(ec, KEY_ESC,
++					  MODIFIER_CTRL | MODIFIER_SHIFT,
++					  task_manager_binding, shell);
  	/* hexaOS: Alt+Tab switches windows too, as on Windows */
  	if (mod != MODIFIER_ALT)
  		weston_compositor_add_key_binding(ec, KEY_TAB, MODIFIER_ALT,
-@@ -4989,7 +5361,7 @@ wet_shell_init(struct weston_compositor *ec,
+@@ -4989,7 +5395,7 @@ wet_shell_init(struct weston_compositor *ec,
  		return -1;
  
  	if (wl_global_create(ec->wl_display,
@@ -3060,7 +3810,7 @@ index fc34eb4..f847f2f 100644
  	struct wl_listener output_create_listener;
  	struct wl_listener output_move_listener;
 diff --git a/protocol/weston-desktop-shell.xml b/protocol/weston-desktop-shell.xml
-index 91c5eb4..69ccfc1 100644
+index 91c5eb4..9db6748 100644
 --- a/protocol/weston-desktop-shell.xml
 +++ b/protocol/weston-desktop-shell.xml
 @@ -1,6 +1,6 @@
@@ -3071,7 +3821,7 @@ index 91c5eb4..69ccfc1 100644
      <description summary="create desktop widgets and helpers">
        Traditional user interfaces can rely on this interface to define the
        foundations of typical desktops. Currently it's possible to set up
-@@ -114,6 +114,65 @@
+@@ -114,6 +114,78 @@
        <arg name="position" type="uint"/>
      </request>
  
@@ -3080,6 +3830,7 @@ index 91c5eb4..69ccfc1 100644
 +    <enum name="window_flags" bitfield="true" since="2">
 +      <entry name="activated" value="1"/>
 +      <entry name="minimized" value="2"/>
++      <entry name="maximized" value="4"/>
 +    </enum>
 +
 +    <event name="window" since="2">
@@ -3132,6 +3883,18 @@ index 91c5eb4..69ccfc1 100644
 +
 +    <event name="menu_key" since="2">
 +      <description summary="the Super key was pressed and released alone"/>
++    </event>
++
++    <request name="window_set_maximized" since="2">
++      <description summary="maximize a window, or restore it to its normal size">
++	Also shows the window if it is minimized, and gives it focus.
++      </description>
++      <arg name="id" type="uint"/>
++      <arg name="maximized" type="uint"/>
++    </request>
++
++    <event name="task_manager_key" since="2">
++      <description summary="Ctrl+Shift+Esc was pressed: open the Task Manager"/>
 +    </event>
 +
    </interface>
