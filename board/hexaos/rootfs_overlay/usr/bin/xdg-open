@@ -1,0 +1,9 @@
+#!/bin/sh
+# Minimal xdg-open (hexaOS has no desktop environment): VS Code opens the
+# GitHub/Microsoft login page with it, and Firefox sends the vscode:// reply back.
+# vscode:// links -> VS Code; web pages and everything else -> Firefox.
+[ -n "$1" ] || { echo "usage: xdg-open URL|FILE" >&2; exit 1; }
+case "$1" in
+    vscode:*|vscode-insiders:*) exec /usr/bin/code --open-url "$1" ;;
+    *) /usr/bin/firefox "$1" >/dev/null 2>&1 & ;;
+esac

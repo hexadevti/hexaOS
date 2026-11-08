@@ -27,6 +27,7 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/bin/hexa-settings           Settings app (gear icon on the panel)
   usr/bin/hexa-setup              applies this machine's settings (check-mark icon on the panel)
   usr/bin/hexa-power              restart / shut down (power icon on the panel)
+  usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login)
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
   etc/hexaos/setup.conf           values for hexa-setup, e.g. Wi-Fi password (not in git;
                                   template: board/hexaos/setup.conf.example)
@@ -35,6 +36,7 @@ board/hexaos/rootfs_overlay/      files copied into the system
   etc/init.d/S12speakers          creates the speaker amplifiers ACPI does not declare
   etc/sudoers.d/power             restart/shut down without a password (wheel group)
   etc/xdg/weston/weston.ini       panel, wallpaper, keyboard layout
+  etc/xdg/mimeapps.list           default apps for links (with usr/share/applications/*.desktop)
 package/hexa-wine/                64-bit Wine with WoW64 (Wayland driver)
 package/hexa-dxvk/                DXVK: DirectX 9/10/11 on Vulkan for Wine
 package/hexa-firefox/             Firefox ESR (official Mozilla binary)

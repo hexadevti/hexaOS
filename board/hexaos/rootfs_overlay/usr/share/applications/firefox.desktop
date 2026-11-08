@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Firefox
+Exec=/usr/bin/firefox %u
+Icon=/usr/share/hexaos/firefox.png
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
