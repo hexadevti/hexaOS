@@ -1,6 +1,6 @@
 #!/bin/bash
 # hexaOS power menu: restart or shut down the computer, or restart the desktop.
-# Opened from the power icon on the desktop panel, or by typing "hexa-power".
+# Opened from the Start menu (Power), or by typing "hexa-power".
 # Restart and shut down need no password (/etc/sudoers.d/power).
 
 infocmp >/dev/null 2>&1 || export TERM=xterm-256color

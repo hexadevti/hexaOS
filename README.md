@@ -24,9 +24,9 @@ board/hexaos/art/                 logo and wallpaper (PostScript -> PNG with Gho
 board/hexaos/rootfs_overlay/      files copied into the system
   usr/sbin/hexa-session           starts the desktop on tty1
   usr/bin/hexa-dev                Ubuntu development container (Docker)
-  usr/bin/hexa-settings           Settings app (gear icon on the panel)
-  usr/bin/hexa-setup              applies this machine's settings (check-mark icon on the panel)
-  usr/bin/hexa-power              restart / shut down (power icon on the panel)
+  usr/bin/hexa-settings           Settings app (Start menu)
+  usr/bin/hexa-setup              applies this machine's settings (Start menu)
+  usr/bin/hexa-power              restart / shut down (Start menu)
   usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login)
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
   etc/hexaos/setup.conf           values for hexa-setup, e.g. Wi-Fi password (not in git;
@@ -35,7 +35,7 @@ board/hexaos/rootfs_overlay/      files copied into the system
   etc/init.d/S02growfs            grows the root partition on first boot
   etc/init.d/S12speakers          creates the speaker amplifiers ACPI does not declare
   etc/sudoers.d/power             restart/shut down without a password (wheel group)
-  etc/xdg/weston/weston.ini       panel, wallpaper, keyboard layout
+  etc/xdg/weston/weston.ini       taskbar, Start menu apps, wallpaper, keyboard layout
   etc/xdg/mimeapps.list           default apps for links (with usr/share/applications/*.desktop)
 package/hexa-wine/                64-bit Wine with WoW64 (Wayland driver)
 package/hexa-dxvk/                DXVK: DirectX 9/10/11 on Vulkan for Wine
@@ -43,7 +43,8 @@ package/hexa-firefox/             Firefox ESR (official Mozilla binary)
 package/hexa-vscode/              Visual Studio Code (official Microsoft binary)
 package/hexa-sof-bin/             Meteor Lake audio firmware
 package/hexa-max98390/            speaker amplifier driver (MAX98390, Galaxy Book4/5)
-patches/                          tweaks to Buildroot packages (splash colors, Alt+Tab in Weston)
+patches/                          tweaks to Buildroot packages (splash colors; Weston: Alt+Tab,
+                                  Windows-style taskbar and Start menu)
 scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
@@ -84,16 +85,17 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Desktop                    | starts automatically (user `hexa`, password `hexa`)     |
 | Text login (root)          | Ctrl+Alt+F2 (root, no password) · back with Ctrl+Alt+F1 |
 | Boot menu                  | hold Esc during boot                                    |
-| Settings                   | gear icon on the panel (or `hexa-settings`): Wi-Fi, wired network, sound, brightness, scale, keyboard layout, timezone, password, services, restart/shut down |
-| Setup (Wi-Fi network...)   | check-mark icon on the panel (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`; safe to run again |
-| Restart / shut down        | power icon on the panel (or `hexa-power`); no password needed |
+| Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key), shortcuts, open windows (click shows / minimizes, middle click closes), volume (wheel changes, click mutes), clock |
+| Settings                   | Start menu (or `hexa-settings`): Wi-Fi, wired network, sound, brightness, scale, keyboard layout, timezone, password, services, restart/shut down |
+| Setup (Wi-Fi network...)   | Start menu (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`; safe to run again |
+| Restart / shut down        | Start menu > Power (or `hexa-power`); no password needed |
 | Switch windows             | Alt+Tab (hold Alt, press Tab to move on, release Alt to pick); Super+Tab works too |
 | Wi-Fi log                  | `grep iwd: /var/log/messages`, `dmesg \| grep wlan0`     |
 | Wi-Fi (command line)       | `iwctl station wlan0 scan`, `iwctl station wlan0 connect "NetworkName"` |
 | Volume (command line)      | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 70%` (or `alsamixer`) |
 | Speakers check             | `dmesg \| grep -i max98390` (4 amplifiers), `ls /sys/bus/i2c/drivers/max98390-hda` |
-| Web browser / YouTube      | Firefox icon on the panel                               |
-| Programming                | VS Code icon, or `code folder/`                         |
+| Web browser / YouTube      | Firefox icon on the taskbar                             |
+| Programming                | VS Code icon on the taskbar, or `code folder/`          |
 | Full Ubuntu (apt)          | `hexa-dev` (Docker container sharing your home folder)  |
 | Windows program            | `wine program.exe`                                      |
 | Windows games (DirectX)    | `hexa-dxvk install` once, then `wine game.exe`          |

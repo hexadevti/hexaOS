@@ -1,6 +1,6 @@
 #!/bin/bash
 # hexaOS Setup: applies this machine's settings in one go (opened from the
-# "Setup" icon on the desktop panel, or by typing "hexa-setup").
+# Start menu, or by typing "hexa-setup").
 # Safe to run again at any time: each step only changes what is not set yet.
 #
 # The values (Wi-Fi network and password...) come from /etc/hexaos/setup.conf,
@@ -27,7 +27,7 @@ finish() {
     else
         echo "${green}${bold}All done.${off}"
     fi
-    # Opened from the panel: keep the window open until Enter
+    # Opened from the Start menu: keep the window open until Enter
     [ -t 0 ] && read -r -p "Press Enter to close..." _
     exit "${FAILED:-0}"
 }
