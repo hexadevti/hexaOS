@@ -1,0 +1,24 @@
+#!/bin/sh
+# Wired networking: get an address (DHCP) on every wired network card,
+# whatever its name: eth0 in VMs, enp0s31f6 on PCs, enx... for USB-Ethernet
+# adapters, usb0 for phone tethering. Cards plugged in after boot are picked up
+# too. Wi-Fi is handled by iwd (S40iwd).
+DAEMON=/usr/libexec/hexaos-wired
+PIDFILE=/run/hexaos-wired.pid
+
+case "$1" in
+    start)
+        start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON"
+        ;;
+    stop)
+        start-stop-daemon -K -q -p "$PIDFILE"
+        for p in /run/udhcpc.*.pid; do
+            [ -f "$p" ] && kill "$(cat "$p")" 2>/dev/null
+        done
+        rm -f "$PIDFILE"
+        ;;
+    restart)
+        "$0" stop; "$0" start
+        ;;
+esac
+exit 0

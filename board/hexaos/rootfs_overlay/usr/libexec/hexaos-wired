@@ -1,0 +1,25 @@
+#!/bin/sh
+# Started by /etc/init.d/S41wired. Every few seconds, starts a DHCP client
+# (udhcpc) for each wired network card that does not have one yet. udhcpc
+# keeps retrying while no cable is connected, so plugging it in later works.
+
+while true; do
+    for dev in /sys/class/net/*; do
+        iface=${dev##*/}
+        case "$iface" in
+            eth*|en*|usb*) ;;
+            *) continue ;;          # lo, docker0, veth*, wlan*, ...
+        esac
+        [ -e "$dev/device" ] || continue     # physical cards only
+        [ -d "$dev/wireless" ] && continue   # Wi-Fi belongs to iwd
+
+        pidfile="/run/udhcpc.$iface.pid"
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+            continue
+        fi
+        ip link set "$iface" up 2>/dev/null
+        udhcpc -f -S -i "$iface" -p "$pidfile" -x hostname:"$(hostname)" \
+            </dev/null >/dev/null 2>&1 &
+    done
+    sleep 5
+done

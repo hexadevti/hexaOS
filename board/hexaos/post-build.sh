@@ -8,7 +8,8 @@ cp -f "$BOARD_DIR/grub-efi.cfg" "$BINARIES_DIR/efi-part/EFI/BOOT/grub.cfg"
 
 # Overlay scripts must be executable (Windows does not keep that bit)
 chmod 0755 "$TARGET_DIR/usr/sbin/hexa-session" "$TARGET_DIR/usr/bin/hexa-dev" \
-    "$TARGET_DIR"/etc/init.d/S00psplash "$TARGET_DIR"/etc/init.d/S01keymap "$TARGET_DIR"/etc/init.d/S02growfs
+    "$TARGET_DIR"/etc/init.d/S00psplash "$TARGET_DIR"/etc/init.d/S01keymap "$TARGET_DIR"/etc/init.d/S02growfs \
+    "$TARGET_DIR"/etc/init.d/S41wired "$TARGET_DIR/usr/libexec/hexaos-wired"
 chmod 0440 "$TARGET_DIR/etc/sudoers.d/wheel"
 
 # tty1 = graphical session (or text login in "hexaos.text" mode)
