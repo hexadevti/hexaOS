@@ -1,0 +1,24 @@
+%!PS
+% 24x24 panel icon: hexaOS Settings (a gear)
+(common.ps) run
+gsave
+  12 12 11.5 hexpath clip
+  << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 24 24]
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [blue] /C1 [cyan] /N 1 >>
+     /Extend [true true] >> shfill
+grestore
+% Gear: 8 teeth around a ring, with a hole in the middle
+bg setrgbcolor
+gsave
+  12 12 translate
+  0 45 315 {
+    gsave
+      rotate
+      -1.3 4.2 2.6 3.0 rectfill
+    grestore
+  } for
+  newpath 0 0 5.2 0 360 arc closepath
+  0 0 2.2 360 0 arcn closepath
+  fill
+grestore
+showpage

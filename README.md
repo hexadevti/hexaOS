@@ -24,6 +24,7 @@ board/hexaos/art/                 logo and wallpaper (PostScript -> PNG with Gho
 board/hexaos/rootfs_overlay/      files copied into the system
   usr/sbin/hexa-session           starts the desktop on tty1
   usr/bin/hexa-dev                Ubuntu development container (Docker)
+  usr/bin/hexa-settings           Settings app (gear icon on the panel)
   etc/init.d/S02growfs            grows the root partition on first boot
   etc/xdg/weston/weston.ini       panel, wallpaper, keyboard layout
 package/hexa-wine/                64-bit Wine with WoW64 (Wayland driver)
@@ -72,8 +73,9 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Desktop                    | starts automatically (user `hexa`, password `hexa`)     |
 | Text login (root)          | Ctrl+Alt+F2 (root, no password) · back with Ctrl+Alt+F1 |
 | Boot menu                  | hold Esc during boot                                    |
-| Wi-Fi                      | `iwctl station wlan0 scan`, `iwctl station wlan0 connect "NetworkName"` |
-| Volume                     | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 70%` (or `alsamixer`) |
+| Settings                   | gear icon on the panel (or `hexa-settings`): Wi-Fi, wired network, sound, brightness, scale, keyboard layout, timezone, password, services, restart/shut down |
+| Wi-Fi (command line)       | `iwctl station wlan0 scan`, `iwctl station wlan0 connect "NetworkName"` |
+| Volume (command line)      | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 70%` (or `alsamixer`) |
 | Web browser / YouTube      | Firefox icon on the panel                               |
 | Programming                | VS Code icon, or `code folder/`                         |
 | Full Ubuntu (apt)          | `hexa-dev` (Docker container sharing your home folder)  |
@@ -81,7 +83,7 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Windows games (DirectX)    | `hexa-dxvk install` once, then `wine game.exe`          |
 | Claude Code (first time)   | `curl -fsSL https://claude.ai/install.sh \| bash`, then `claude` |
 | Administrator              | `sudo command` (password of the hexa user)              |
-| Change password            | `passwd`                                                |
+| Change password            | Settings > Password (or `sudo passwd hexa`)             |
 
 The "text mode" and "safe mode" boot menu entries help diagnose video problems.
 
@@ -105,6 +107,7 @@ On first boot the system partition grows automatically to fill the whole drive.
 - Games with kernel anti-cheat (Valorant, Fortnite...) do not run under Wine.
 - On first run Wine creates `~/.wine` (slow) and offers to install Wine Mono (.NET);
   this needs internet. "Cancel" works too.
-- Docker starts at boot (~50 MB of RAM); `hexa-dev` downloads Ubuntu the first time.
+- Docker does not start at boot: `hexa-dev` starts it (asks for the password), or use
+  Settings > Services (which can also turn on "start at boot"). `hexa-dev` downloads Ubuntu the first time.
 - Without KVM, the QEMU scripts use `-cpu max,-smap`: with SMAP, QEMU 8.x TCG
   kills Wine. This does not happen on real hardware.

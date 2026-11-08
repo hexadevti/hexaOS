@@ -1,0 +1,530 @@
+#!/bin/bash
+# hexaOS Settings: menus for the most common settings.
+# Opened from the gear icon on the desktop panel, or by typing "hexa-settings".
+# Personal settings (Wi-Fi, sound, brightness, keyboard, display scale) need no
+# password; changes to the whole system ask for your password (sudo).
+
+TITLE="hexaOS Settings"
+CONF_DIR="$HOME/.config/hexaos"
+SETTINGS="$CONF_DIR/settings"        # values chosen here (shell variables)
+DESKTOP_INI="$CONF_DIR/desktop.ini"  # merged into Weston's config at login (hexa-session)
+
+# Fall back to a common terminal type if this one is unknown
+infocmp >/dev/null 2>&1 || export TERM=xterm-256color
+
+KB_LAYOUT=br
+KB_VARIANT=abnt2
+SCALE=1
+# shellcheck source=/dev/null
+[ -f "$SETTINGS" ] && . "$SETTINGS"
+
+# ---------------------------------------------------------------- helpers
+
+# Runs dialog and prints the user's choice on stdout
+d() { dialog --backtitle "$TITLE" "$@" 3>&1 1>&2 2>&3; }
+
+msg() {   # msg TITLE TEXT
+    local lines
+    lines=$(printf '%b\n' "$2" | wc -l)
+    dialog --backtitle "$TITLE" --title "$1" --no-collapse --msgbox "$2" $((lines + 5)) 76
+}
+
+info() { dialog --backtitle "$TITLE" --infobox "$1" 5 60; }
+
+ask() { dialog --backtitle "$TITLE" --title "$1" --yesno "$2" 9 70; }
+
+strip_colors() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+# Runs a command as administrator, asking for the password if needed
+as_root() {
+    if [ "$(id -u)" = 0 ]; then "$@"; return; fi
+    if ! sudo -n true 2>/dev/null; then
+        clear
+        echo
+        echo "  This change affects the whole system and needs your password."
+        echo
+        if ! sudo -v -p "  Password for $USER: "; then
+            msg "Not changed" "Wrong password, or this user may not make system changes."
+            return 1
+        fi
+    fi
+    sudo "$@"
+}
+
+save_settings() {
+    mkdir -p "$CONF_DIR"
+    printf 'KB_LAYOUT=%s\nKB_VARIANT=%s\nSCALE=%s\n' "$KB_LAYOUT" "$KB_VARIANT" "$SCALE" > "$SETTINGS"
+    {
+        echo "# Written by hexa-settings; overrides /etc/xdg/weston/weston.ini"
+        echo "[keyboard]"
+        echo "keymap_layout=$KB_LAYOUT"
+        [ -n "$KB_VARIANT" ] && echo "keymap_variant=$KB_VARIANT"
+        if [ "$SCALE" != 1 ]; then
+            for o in $(screens); do
+                printf '\n[output]\nname=%s\nscale=%s\n' "$o" "$SCALE"
+            done
+        fi
+    } > "$DESKTOP_INI"
+}
+
+# Names of the connected screens, as the desktop calls them (eDP-1, HDMI-A-1...)
+screens() {
+    local c
+    for c in /sys/class/drm/card*-*; do
+        [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
+        c=${c##*/}
+        echo "${c#card*-}"
+    done
+}
+
+restart_desktop() {
+    if ask "Restart the desktop" "Restart the desktop now?\n\nAll open windows will close, so save your work first."; then
+        clear
+        kill "$(pidof weston)" 2>/dev/null
+        exit 0
+    fi
+}
+
+offer_restart() {   # offer_restart WHAT
+    if ask "Apply" "$1 will change when the desktop restarts.\n\nRestart it now? (All open windows will close.)"; then
+        clear
+        kill "$(pidof weston)" 2>/dev/null
+        exit 0
+    fi
+}
+
+# ------------------------------------------------------------------ Wi-Fi
+
+wifi_iface() {
+    local dev
+    for dev in /sys/class/net/*; do
+        [ -d "$dev/wireless" ] && { echo "${dev##*/}"; return; }
+    done
+}
+
+wifi_menu() {
+    local W c status powered
+    W=$(wifi_iface)
+    if [ -z "$W" ]; then
+        msg "Wi-Fi" "No Wi-Fi adapter was found.\n\n(In a virtual machine this is normal: use the wired network.)"
+        return
+    fi
+    while true; do
+        powered=$(iwctl device "$W" show 2>/dev/null | strip_colors | awk '$1 == "Powered" {print $2}')
+        if [ "$powered" = off ]; then
+            status="Wi-Fi is turned off."
+        else
+            status=$(iwctl station "$W" show 2>/dev/null | strip_colors |
+                     awk '$1 == "State" {print "State: " $2}
+                          /Connected network/ {sub(/.*Connected network +/, ""); print "Network: " $0}
+                          /IPv4 address/ {print "Address: " $NF}')
+        fi
+        c=$(d --title "Wi-Fi ($W)" --cancel-label "Back" --no-tags --menu "$status" 16 70 6 \
+            connect "Connect to a network" \
+            hidden  "Connect to a hidden network" \
+            disconnect "Disconnect" \
+            forget  "Forget a saved network" \
+            power   "Turn Wi-Fi $([ "$powered" = off ] && echo on || echo off)") || return
+        case "$c" in
+            connect)    wifi_connect "$W" ;;
+            hidden)     wifi_hidden "$W" ;;
+            disconnect) iwctl station "$W" disconnect 2>/dev/null ;;
+            forget)     wifi_forget ;;
+            power)
+                if [ "$powered" = off ]; then
+                    iwctl device "$W" set-property Powered on
+                else
+                    iwctl device "$W" set-property Powered off
+                fi ;;
+        esac
+    done
+}
+
+# wifi_join IFACE SSID SECURITY [hidden]
+wifi_join() {
+    local W=$1 ssid=$2 sec=$3 cmd=connect pass i state
+    [ "$4" = hidden ] && cmd=connect-hidden
+    if [ "$sec" = 8021x ]; then
+        msg "Wi-Fi" "\"$ssid\" uses enterprise login (802.1X), which this menu does not set up.\nSee: man iwd.network"
+        return
+    fi
+    info "Connecting to \"$ssid\"..."
+    # Open or already-saved networks connect without asking for a password
+    if ! iwctl --dont-ask station "$W" "$cmd" "$ssid" >/dev/null 2>&1; then
+        pass=$(d --title "Wi-Fi password" --insecure --passwordbox "Password for \"$ssid\":" 9 60) || return
+        info "Connecting to \"$ssid\"..."
+        iwctl --passphrase "$pass" station "$W" "$cmd" "$ssid" >/dev/null 2>&1
+    fi
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        state=$(iwctl station "$W" show 2>/dev/null | strip_colors | awk '$1 == "State" {print $2}')
+        [ "$state" = connected ] && break
+        sleep 1
+    done
+    if [ "$state" = connected ]; then
+        sleep 2   # give DHCP a moment
+        msg "Wi-Fi" "Connected to \"$ssid\".\nIt is saved and will reconnect automatically."
+    else
+        msg "Wi-Fi" "Could not connect to \"$ssid\".\nCheck the password and try again."
+    fi
+}
+
+wifi_connect() {
+    local W=$1 l re i=0 c
+    local -a names secs items
+    info "Looking for networks..."
+    iwctl station "$W" scan >/dev/null 2>&1
+    sleep 3
+    re='^[[:space:]]*(>)?[[:space:]]*(.*[^[:space:]])[[:space:]]+(psk|open|8021x|wep|owe)[[:space:]]+\*'
+    while IFS= read -r l; do
+        if [[ $l =~ $re ]]; then
+            names[i]=${BASH_REMATCH[2]}
+            secs[i]=${BASH_REMATCH[3]}
+            local label="${names[i]}"
+            [ "${secs[i]}" = open ] && label+="  (open)"
+            [ -n "${BASH_REMATCH[1]}" ] && label+="  [connected]"
+            items+=("$i" "$label")
+            i=$((i + 1))
+        fi
+    done < <(iwctl station "$W" get-networks 2>/dev/null | strip_colors)
+    if [ $i = 0 ]; then
+        msg "Wi-Fi" "No networks found. Try again in a few seconds."
+        return
+    fi
+    c=$(d --title "Wi-Fi networks" --cancel-label "Back" --no-tags --menu "Choose a network:" 20 70 12 "${items[@]}") || return
+    wifi_join "$W" "${names[c]}" "${secs[c]}"
+}
+
+wifi_hidden() {
+    local ssid
+    ssid=$(d --title "Hidden network" --inputbox "Network name (SSID):" 9 60) || return
+    [ -n "$ssid" ] && wifi_join "$1" "$ssid" psk hidden
+}
+
+wifi_forget() {
+    local l re i=0 c
+    local -a names items
+    re='^[[:space:]]*(.*[^[:space:]])[[:space:]]+(psk|open|8021x|wep|owe)([[:space:]]|$)'
+    while IFS= read -r l; do
+        if [[ $l =~ $re ]]; then
+            names[i]=${BASH_REMATCH[1]}
+            items+=("$i" "${names[i]}")
+            i=$((i + 1))
+        fi
+    done < <(iwctl known-networks list 2>/dev/null | strip_colors)
+    if [ $i = 0 ]; then
+        msg "Wi-Fi" "There are no saved networks."
+        return
+    fi
+    c=$(d --title "Saved networks" --cancel-label "Back" --no-tags --menu "Choose a network to forget:" 18 70 10 "${items[@]}") || return
+    iwctl known-networks "${names[c]}" forget >/dev/null 2>&1 &&
+        msg "Wi-Fi" "\"${names[c]}\" was forgotten."
+}
+
+# ---------------------------------------------------------- Wired network
+
+wired_menu() {
+    local text="" dev i addr state gw dns c
+    for dev in /sys/class/net/*; do
+        i=${dev##*/}
+        case "$i" in eth*|en*|usb*) ;; *) continue ;; esac
+        [ -e "$dev/device" ] || continue
+        [ -d "$dev/wireless" ] && continue
+        if [ "$(cat "$dev/carrier" 2>/dev/null)" = 1 ]; then state="cable connected"; else state="no cable"; fi
+        addr=$(ip -4 addr show dev "$i" 2>/dev/null | awk '/inet / {print $2}')
+        text+="$i: $state, address ${addr:-none}\n"
+    done
+    if [ -z "$text" ]; then
+        msg "Wired network" "No wired network card was found.\n(USB-Ethernet adapters work too: just plug one in.)"
+        return
+    fi
+    gw=$(ip route 2>/dev/null | awk '$1 == "default" {print $3; exit}')
+    dns=$(awk '$1 == "nameserver" {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    text+="\nGateway: ${gw:-none}\nDNS: ${dns:-none}\n\nWired networks connect automatically when a cable is plugged in."
+    c=$(d --title "Wired network" --cancel-label "Back" --no-tags --menu "$text" 17 72 1 \
+        reconnect "Reconnect (ask the router for a new address)") || return
+    if [ "$c" = reconnect ]; then
+        as_root /etc/init.d/S41wired restart >/dev/null 2>&1 && info "Reconnecting..." && sleep 6
+        wired_menu
+    fi
+}
+
+# ------------------------------------------------------------------ Sound
+
+volume_pct() {   # volume_pct SINK|SOURCE
+    wpctl get-volume "@DEFAULT_AUDIO_$1@" 2>/dev/null | awk '{printf "%d", $2 * 100 + 0.5}'
+}
+is_muted() { wpctl get-volume "@DEFAULT_AUDIO_$1@" 2>/dev/null | grep -q MUTED; }
+
+sound_menu() {
+    local c v spk mic
+    if ! wpctl status >/dev/null 2>&1; then
+        msg "Sound" "The sound service is not running.\n(Open Settings from the desktop, not from a text console.)"
+        return
+    fi
+    while true; do
+        spk="$(volume_pct SINK)%"; is_muted SINK && spk+=" (muted)"
+        mic="$(volume_pct SOURCE)%"; is_muted SOURCE && mic+=" (muted)"
+        c=$(d --title "Sound" --cancel-label "Back" --no-tags --menu "Speakers: $spk\nMicrophone: $mic" 16 70 6 \
+            volume "Set speaker volume" \
+            mute   "Mute / unmute speakers" \
+            micvol "Set microphone volume" \
+            micmute "Mute / unmute microphone" \
+            output "Choose output (speakers, headphones, HDMI...)" \
+            mixer  "Advanced mixer (alsamixer)") || return
+        case "$c" in
+            volume)
+                v=$(d --title "Speaker volume" --rangebox "Use arrows or type a number, then Enter" 7 60 0 100 "$(volume_pct SINK)") &&
+                    wpctl set-volume @DEFAULT_AUDIO_SINK@ "$v%" ;;
+            mute)    wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle ;;
+            micvol)
+                v=$(d --title "Microphone volume" --rangebox "Use arrows or type a number, then Enter" 7 60 0 100 "$(volume_pct SOURCE)") &&
+                    wpctl set-volume @DEFAULT_AUDIO_SOURCE@ "$v%" ;;
+            micmute) wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle ;;
+            output)  sound_output ;;
+            mixer)   alsamixer ;;
+        esac
+    done
+}
+
+sound_output() {
+    local l re c
+    local -a items
+    re='^[^0-9]*(\*)?[[:space:]]*([0-9]+)\.[[:space:]]+(.*[^[:space:]])[[:space:]]+\[vol:'
+    while IFS= read -r l; do
+        if [[ $l =~ $re ]]; then
+            local label=${BASH_REMATCH[3]}
+            [ -n "${BASH_REMATCH[1]}" ] && label+="  [in use]"
+            items+=("${BASH_REMATCH[2]}" "$label")
+        fi
+    done < <(wpctl status 2>/dev/null | awk '/^Audio/ {a=1} /^Video/ {a=0}
+                                           a && /Sinks:/ {s=1; next}
+                                           a && /(Sources|Filters|Streams):/ {s=0}
+                                           a && s')
+    if [ ${#items[@]} = 0 ]; then
+        msg "Sound output" "No sound outputs were found."
+        return
+    fi
+    c=$(d --title "Sound output" --cancel-label "Back" --no-tags --menu "Play sound through:" 16 72 8 "${items[@]}") || return
+    wpctl set-default "$c"
+}
+
+# ---------------------------------------------------------------- Display
+
+display_menu() {
+    local c bl max cur v
+    while true; do
+        bl=$(ls -d /sys/class/backlight/* 2>/dev/null | head -1)
+        c=$(d --title "Display" --cancel-label "Back" --no-tags --menu "Screens: $(screens | tr '\n' ' ')\nScale: $((SCALE * 100))%" 14 70 3 \
+            brightness "Brightness" \
+            scale "Size of text and windows (scale)" \
+            restart "Restart the desktop") || return
+        case "$c" in
+            brightness)
+                if [ -z "$bl" ]; then
+                    msg "Brightness" "This screen has no brightness control.\n(External monitors and virtual machines use their own buttons.)"
+                    continue
+                fi
+                max=$(cat "$bl/max_brightness"); cur=$(cat "$bl/brightness")
+                v=$(d --title "Brightness" --rangebox "Use arrows or type a number, then Enter" 7 60 5 100 $((cur * 100 / max))) || continue
+                v=$((v * max / 100)); [ "$v" -lt 1 ] && v=1
+                echo "$v" > "$bl/brightness" 2>/dev/null || echo "$v" | as_root tee "$bl/brightness" >/dev/null ;;
+            scale)
+                v=$(d --title "Scale" --cancel-label "Back" --no-tags --default-item "$SCALE" --menu \
+                    "Larger scale = bigger text and windows.\n200% suits high-resolution laptop screens such as the Galaxy Book4 Pro." 14 70 3 \
+                    1 "100%  (normal)" 2 "200%  (large)" 3 "300%  (extra large)") || continue
+                if [ "$v" != "$SCALE" ]; then
+                    SCALE=$v; save_settings
+                    offer_restart "The scale"
+                fi ;;
+            restart) restart_desktop ;;
+        esac
+    done
+}
+
+# --------------------------------------------------------------- Keyboard
+
+keyboard_menu() {
+    local c
+    c=$(d --title "Keyboard layout" --cancel-label "Back" --no-tags --default-item "$KB_LAYOUT:$KB_VARIANT" --menu \
+        "Layout of the keyboard in the desktop (now: $KB_LAYOUT${KB_VARIANT:+ $KB_VARIANT})" 18 70 9 \
+        "br:abnt2" "Portuguese (Brazil, ABNT2)" \
+        "us:"      "English (US)" \
+        "us:intl"  "English (US, international with dead keys)" \
+        "pt:"      "Portuguese (Portugal)" \
+        "es:"      "Spanish" \
+        "latam:"   "Spanish (Latin America)" \
+        "gb:"      "English (UK)" \
+        "de:"      "German" \
+        "fr:"      "French") || return
+    if [ "$c" != "$KB_LAYOUT:$KB_VARIANT" ]; then
+        KB_LAYOUT=${c%%:*}; KB_VARIANT=${c#*:}
+        save_settings
+        offer_restart "The keyboard layout"
+    fi
+}
+
+# ---------------------------------------------------------- Date and time
+
+time_menu() {
+    local c tz sync
+    while true; do
+        tz=$(cat /etc/timezone 2>/dev/null || echo UTC)
+        if chronyc -n tracking 2>/dev/null | grep -q "Leap status *: Normal"; then
+            sync="synchronized with the internet"
+        else
+            sync="not synchronized yet (needs internet)"
+        fi
+        c=$(d --title "Date and time" --cancel-label "Back" --no-tags --menu \
+            "$(date '+%A, %d %B %Y  %H:%M')\nTimezone: $tz\nClock: $sync" 14 70 2 \
+            timezone "Change timezone" \
+            sync "Synchronize the clock now") || return
+        case "$c" in
+            timezone) timezone_pick ;;
+            sync)
+                info "Synchronizing..."
+                as_root chronyc -a makestep >/dev/null 2>&1 && as_root hwclock -w -u 2>/dev/null
+                sleep 1 ;;
+        esac
+    done
+}
+
+timezone_pick() {
+    local zi=/usr/share/zoneinfo region city r
+    local -a items
+    for r in Africa America Antarctica Asia Atlantic Australia Europe Indian Pacific; do
+        [ -d "$zi/$r" ] && items+=("$r" "$r")
+    done
+    items+=("UTC" "UTC (no daylight saving)")
+    region=$(d --title "Timezone" --cancel-label "Back" --no-tags --menu "Region:" 18 50 10 "${items[@]}") || return
+    if [ "$region" = UTC ]; then
+        city=UTC
+    else
+        items=()
+        while IFS= read -r r; do items+=("$region/$r" "${r//_/ }"); done \
+            < <(cd "$zi/$region" && find . -type f | sed 's|^\./||' | sort)
+        city=$(d --title "Timezone" --cancel-label "Back" --no-tags --default-item "$(cat /etc/timezone 2>/dev/null)" \
+               --menu "City (type the first letter to jump):" 20 50 14 "${items[@]}") || return
+    fi
+    [ -f "$zi/$city" ] || return
+    as_root sh -c "ln -sf ../usr/share/zoneinfo/$city /etc/localtime && echo $city > /etc/timezone" &&
+        offer_restart "The clock on the panel"
+}
+
+# --------------------------------------------------------------- Password
+
+password_menu() {
+    clear
+    echo
+    echo "  Change the password of \"$USER\""
+    echo
+    echo "  1. Type your CURRENT password (if asked)."
+    echo "  2. Type the NEW password twice."
+    echo
+    if [ "$(id -u)" = 0 ]; then passwd; else as_root passwd "$USER"; fi
+    echo
+    read -r -p "  Press Enter to go back." _
+}
+
+# --------------------------------------------------------------- Services
+
+running() { pidof "$1" >/dev/null 2>&1; }
+
+services_menu() {
+    local c docker cups boot
+    while true; do
+        if running dockerd; then docker="running"; else docker="stopped"; fi
+        if running cupsd; then cups="running"; else cups="stopped"; fi
+        if [ -e /etc/init.d/S60dockerd ]; then boot="yes"; else boot="no"; fi
+        c=$(d --title "Services" --cancel-label "Back" --no-tags --menu \
+            "Select a service to start or stop it.\nDocker also starts by itself when you run hexa-dev." 14 70 3 \
+            docker "Docker (containers, hexa-dev): $docker" \
+            dockerboot "Start Docker at boot: $boot" \
+            cups   "Printing (CUPS): $cups") || return
+        case "$c" in
+            docker) service_toggle dockerd /etc/init.d/dockerd "Docker" ;;
+            dockerboot)
+                if [ "$boot" = yes ]; then
+                    as_root rm -f /etc/init.d/S60dockerd
+                else
+                    as_root ln -sf dockerd /etc/init.d/S60dockerd
+                fi ;;
+            cups)   service_toggle cupsd /etc/init.d/S81cupsd "Printing" ;;
+        esac
+    done
+}
+
+service_toggle() {   # service_toggle PROCESS SCRIPT NAME
+    local action=start
+    running "$1" && action=stop
+    info "$3: ${action}ing..."
+    as_root "$2" "$action" >/dev/null 2>&1
+    sleep 2
+}
+
+# ------------------------------------------------------------------ About
+
+about_menu() {
+    local name cpu mem disk gpu up ips
+    name=$(. /etc/os-release; echo "$PRETTY_NAME")
+    cpu=$(lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | head -1)
+    mem=$(free -m | awk '/^Mem:/ {printf "%.1f GB total, %.1f GB in use", $2/1024, $3/1024}')
+    disk=$(df -h / | awk 'NR == 2 {print $2 " total, " $4 " free"}')
+    gpu=$(for drv in /sys/class/drm/card*/device/driver; do basename "$(readlink -f "$drv")"; done 2>/dev/null | sort -u | tr '\n' ' ')
+    up=$(uptime | sed 's/.*up *//; s/, *[0-9]* user.*//; s/, *load.*//')
+    ips=$(ip -4 addr show 2>/dev/null | awk '/inet / && $NF != "lo" && $NF != "docker0" {printf "%s (%s) ", $2, $NF}')
+    msg "About this computer" \
+"System:    $name
+Kernel:    $(uname -r)
+Processor: ${cpu:-unknown} ($(nproc) threads)
+Memory:    $mem
+Disk:      $disk
+Graphics:  ${gpu:-unknown}
+Network:   ${ips:-not connected}
+Running:   $up"
+}
+
+# ------------------------------------------------------------------ Power
+
+power_menu() {
+    local c
+    c=$(d --title "Restart / shut down" --cancel-label "Back" --no-tags --menu "" 12 60 3 \
+        desktop "Restart the desktop" \
+        reboot  "Restart the computer" \
+        off     "Shut down") || return
+    case "$c" in
+        desktop) restart_desktop ;;
+        reboot)  ask "Restart" "Restart the computer now?\nSave your work first." && { clear; as_root reboot; } ;;
+        off)     ask "Shut down" "Shut down the computer now?\nSave your work first." && { clear; as_root poweroff; } ;;
+    esac
+}
+
+# ------------------------------------------------------------------- Main
+
+c=wifi
+while true; do
+    c=$(d --title "$TITLE" --cancel-label "Exit" --no-tags --default-item "$c" --menu \
+        "Use the arrow keys and Enter. Esc goes back." 20 60 10 \
+        wifi     "Wi-Fi" \
+        wired    "Wired network" \
+        sound    "Sound" \
+        display  "Display (brightness, scale)" \
+        keyboard "Keyboard layout" \
+        time     "Date and time" \
+        password "Password" \
+        services "Services (Docker, printing)" \
+        about    "About this computer" \
+        power    "Restart / shut down") || break
+    case "$c" in
+        wifi)     wifi_menu ;;
+        wired)    wired_menu ;;
+        sound)    sound_menu ;;
+        display)  display_menu ;;
+        keyboard) keyboard_menu ;;
+        time)     time_menu ;;
+        password) password_menu ;;
+        services) services_menu ;;
+        about)    about_menu ;;
+        power)    power_menu ;;
+    esac
+done
+clear

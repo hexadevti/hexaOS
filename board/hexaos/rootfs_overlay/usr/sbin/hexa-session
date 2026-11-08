@@ -31,19 +31,28 @@ for drv in /sys/class/drm/card*/device/driver; do
     esac
 done
 
+# Desktop config: the user's choices from hexa-settings (keyboard, scale) come
+# first, because Weston uses the first section it finds with a given name.
+USER_INI=$(eval echo "~$USER_NAME")/.config/hexaos/desktop.ini
+{
+    [ -f "$USER_INI" ] && cat "$USER_INI" && echo
+    cat /etc/xdg/weston/weston.ini
+} > "$RUNTIME_DIR/weston.ini"
+chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR/weston.ini"
+
 cat > "$RUNTIME_DIR/session.sh" <<SESSION
 #!/bin/sh
 # Sound: PipeWire + PulseAudio server + session manager
 pipewire &
 pipewire-pulse &
 wireplumber &
-exec weston --renderer=$RENDERER --log=/tmp/weston.log
+exec weston --renderer=$RENDERER --config=$RUNTIME_DIR/weston.ini --log=/tmp/weston.log
 SESSION
 chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR/session.sh"
 chmod 755 "$RUNTIME_DIR/session.sh"
 
 su "$USER_NAME" -c "cd ~ && \
-    LANG=en_US.UTF-8 TZ=America/Sao_Paulo XDG_RUNTIME_DIR=$RUNTIME_DIR \
+    LANG=en_US.UTF-8 XDG_RUNTIME_DIR=$RUNTIME_DIR \
     XDG_SESSION_TYPE=wayland MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=wayland \
     exec dbus-run-session -- $RUNTIME_DIR/session.sh"
 

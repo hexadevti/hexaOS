@@ -8,8 +8,18 @@ NAME=hexa-dev
 IMAGE=${HEXA_DEV_IMAGE:-ubuntu:24.04}
 
 if ! docker info >/dev/null 2>&1; then
-    echo "Docker is not running (sudo /etc/init.d/S60dockerd start)" >&2
-    exit 1
+    # Docker does not start at boot: start it now (asks for your password)
+    echo "Starting Docker..."
+    if [ "$(id -u)" = 0 ]; then /etc/init.d/dockerd start; else sudo /etc/init.d/dockerd start; fi >/dev/null || exit 1
+    i=0
+    until docker info >/dev/null 2>&1; do
+        i=$((i + 1))
+        if [ $i -gt 30 ]; then
+            echo "Docker did not start (see /var/log/messages)" >&2
+            exit 1
+        fi
+        sleep 1
+    done
 fi
 
 if [ "$1" = "--reset" ]; then

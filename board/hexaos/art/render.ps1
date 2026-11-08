@@ -14,5 +14,6 @@ try {
     & $gs @common "-g1920x1080" "-sOutputFile=$overlay\wallpaper.png" "wallpaper.ps"
     & $gs @common "-g480x420" "-sOutputFile=$art\splash-logo.png" "splash.ps"
     & $gs ($common -replace "png16m", "pngalpha") "-g24x24" "-sOutputFile=$overlay\wine.png" "wine-icon.ps"
+    & $gs ($common -replace "png16m", "pngalpha") "-g24x24" "-sOutputFile=$overlay\settings.png" "settings-icon.ps"
 } finally { Pop-Location }
 Write-Output "ok: $overlay\wallpaper.png, $art\splash-logo.png"
