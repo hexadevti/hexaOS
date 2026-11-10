@@ -3,6 +3,8 @@
  *
  * Finds, installs, updates and removes Flatpak apps (Flathub and any other
  * remote of this user) and gives each installed app a Start menu entry.
+ * Installs run one at a time (the others wait in a queue), with their
+ * progress read from flatpak's output.
  *
  * Every flatpak command runs on the host through "flatpak-spawn --host"
  * (permission --talk-name=org.freedesktop.Flatpak), always with --user.
@@ -17,6 +19,7 @@
 #define _GNU_SOURCE
 #include <gtk/gtk.h>
 #include <glib/gstdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define APP_ID		"com.hexaos.Store"
@@ -32,8 +35,10 @@ static GtkWidget *win, *content, *stack, *restart_bar, *spinner, *status;
 static GtkWidget *search_entry, *search_list, *installed_list, *updates_list;
 static GtkWidget *update_all;
 static char *conf_dir, *apps_ini, *icon_dir, *exports, *appstream_dir;
+static GtkWidget *install_bar;	/* progress of the running install, status line */
 static gboolean in_sandbox;
 static GHashTable *installed;	/* app id -> name, from "flatpak list" */
+static GHashTable *search_rows;	/* app id -> button box of its Discover row */
 
 static void refresh_installed(void);
 static void refresh_updates(void);
@@ -167,14 +172,11 @@ job_finished(GObject *src, GAsyncResult *res, gpointer user)
 	g_free(job);
 }
 
-/* Runs ARGS on the host (directly when not in a sandbox); DONE gets the output */
-static void
-run_host(const char *const *args, JobDone done, gpointer data)
+/* ARGS to run on the host: behind flatpak-spawn when in the sandbox */
+static GPtrArray *
+host_argv(const char *const *args)
 {
-	GPtrArray *argv = g_ptr_array_new();
-	GError *e = NULL;
-	GSubprocess *p;
-	Job *job;
+	GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
 
 	if (in_sandbox) {
 		/* The host side starts without the desktop's environment: hand
@@ -194,10 +196,20 @@ run_host(const char *const *args, JobDone done, gpointer data)
 	for (; *args; args++)
 		g_ptr_array_add(argv, g_strdup(*args));
 	g_ptr_array_add(argv, NULL);
+	return argv;
+}
+
+/* Runs ARGS on the host (directly when not in a sandbox); DONE gets the output */
+static void
+run_host(const char *const *args, JobDone done, gpointer data)
+{
+	GPtrArray *argv = host_argv(args);
+	GError *e = NULL;
+	GSubprocess *p;
+	Job *job;
 
 	p = g_subprocess_newv((const char *const *) argv->pdata,
 			      G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, &e);
-	g_ptr_array_set_free_func(argv, g_free);
 	g_ptr_array_free(argv, TRUE);
 	if (!p) {
 		done(FALSE, "", e->message, data);
@@ -208,6 +220,98 @@ run_host(const char *const *args, JobDone done, gpointer data)
 	job->done = done;
 	job->data = data;
 	g_subprocess_communicate_utf8_async(p, NULL, NULL, job_finished, job);
+}
+
+/*
+ * Like run_host, but LINE gets each line of the output (stdout and stderr
+ * together) while the command runs; DONE gets all of it as OUT. Its stdin is
+ * closed, so a question it would ask fails instead of waiting forever.
+ */
+typedef void (*JobLine)(const char *line, gpointer data);
+
+typedef struct {
+	JobDone done;
+	JobLine line;
+	gpointer data;
+	GSubprocess *p;
+	GDataInputStream *in;
+	GString *out;
+} StreamJob;
+
+static void
+stream_exited(GObject *src, GAsyncResult *res, gpointer user)
+{
+	StreamJob *j = user;
+	gboolean ok;
+
+	ok = g_subprocess_wait_finish(j->p, res, NULL) &&
+	     g_subprocess_get_if_exited(j->p) && g_subprocess_get_exit_status(j->p) == 0;
+	j->done(ok, strip_ansi(j->out->str), "", j->data);
+	g_string_free(j->out, TRUE);
+	g_object_unref(j->in);
+	g_object_unref(j->p);
+	g_free(j);
+}
+
+static void
+stream_read(GObject *src, GAsyncResult *res, gpointer user)
+{
+	StreamJob *j = user;
+	GError *e = NULL;
+	char *raw, *line, **parts;
+	int i;
+
+	raw = g_data_input_stream_read_line_finish(j->in, res, NULL, &e);
+	if (!raw) {
+		/* end of the output (or a read error): wait for the exit status */
+		if (e)
+			g_string_append_printf(j->out, "%s\n", e->message);
+		g_clear_error(&e);
+		g_subprocess_wait_async(j->p, NULL, stream_exited, j);
+		return;
+	}
+	line = g_utf8_make_valid(raw, -1);
+	g_string_append_printf(j->out, "%s\n", line);
+	/* a line redrawn with \r: only its last state counts */
+	parts = g_strsplit(line, "\r", -1);
+	for (i = g_strv_length(parts) - 1; i >= 0; i--) {
+		if (*parts[i]) {
+			j->line(strip_ansi(parts[i]), j->data);
+			break;
+		}
+	}
+	g_strfreev(parts);
+	g_free(line);
+	g_free(raw);
+	g_data_input_stream_read_line_async(j->in, G_PRIORITY_DEFAULT, NULL, stream_read, j);
+}
+
+static void
+run_host_stream(const char *const *args, JobLine line, JobDone done, gpointer data)
+{
+	GPtrArray *argv = host_argv(args);
+	GError *e = NULL;
+	GSubprocess *p;
+	StreamJob *j;
+
+	p = g_subprocess_newv((const char *const *) argv->pdata,
+			      G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+			      G_SUBPROCESS_FLAGS_STDERR_MERGE, &e);
+	g_ptr_array_free(argv, TRUE);
+	if (!p) {
+		done(FALSE, "", e->message, data);
+		g_error_free(e);
+		return;
+	}
+	g_output_stream_close(g_subprocess_get_stdin_pipe(p), NULL, NULL);
+	j = g_new0(StreamJob, 1);
+	j->done = done;
+	j->line = line;
+	j->data = data;
+	j->p = p;
+	j->in = g_data_input_stream_new(g_subprocess_get_stdout_pipe(p));
+	j->out = g_string_new(NULL);
+	g_data_input_stream_read_line_async(j->in, G_PRIORITY_DEFAULT, NULL, stream_read, j);
 }
 
 /* Lines of tab-separated columns ("flatpak ... --columns=a,b,c") */
@@ -575,7 +679,7 @@ app_button(GtkWidget *box, const char *label, const char *id, const char *name,
  */
 
 typedef struct {
-	char *id, *name;
+	char *id, *name, *remote;
 } AppRef;
 
 static AppRef *
@@ -593,44 +697,272 @@ app_ref_free(AppRef *a)
 {
 	g_free(a->id);
 	g_free(a->name);
+	g_free(a->remote);
 	g_free(a);
+}
+
+/*
+ * Installing: one app at a time, the others wait in a queue. The Discover row
+ * of an app shows where it is (progress, Waiting, Installed), so it cannot be
+ * installed twice.
+ */
+
+static GQueue install_queue = G_QUEUE_INIT;	/* AppRefs waiting */
+static AppRef *installing;			/* the one running, or NULL */
+static int inst_step, inst_steps, inst_pct;	/* "Installing 2/4… 45%" */
+static guint pulse_id;
+
+static void on_install(GtkButton *b, gpointer data);
+static void on_open(GtkButton *b, gpointer data);
+
+static gboolean
+is_queued(const char *id)
+{
+	GList *l;
+
+	for (l = install_queue.head; l; l = l->next)
+		if (strcmp(((AppRef *) l->data)->id, id) == 0)
+			return TRUE;
+	return FALSE;
+}
+
+/* A button that does nothing, showing a state */
+static void
+state_button(GtkWidget *box, const char *label, const char *id, const char *name)
+{
+	gtk_widget_set_sensitive(app_button(box, label, id, name, NULL, NULL), FALSE);
+}
+
+/* Progress text: "Part 2 of 4 · 45%" */
+static char *
+progress_text(void)
+{
+	if (!inst_steps)
+		return g_strdup("Getting ready…");
+	if (inst_steps > 1)
+		return g_strdup_printf("Part %d of %d · %d%%", inst_step, inst_steps, inst_pct);
+	return g_strdup_printf("%d%%", inst_pct);
+}
+
+/* Shows the progress of the running install, in its row and the status line */
+static void
+show_progress(void)
+{
+	GtkWidget *box, *row_bar = NULL;
+	char *text, *full;
+
+	if (!installing) {
+		gtk_widget_hide(install_bar);
+		return;
+	}
+	box = g_hash_table_lookup(search_rows, installing->id);
+	if (box)
+		row_bar = g_object_get_data(G_OBJECT(box), "progress");
+	text = progress_text();
+	if (install_queue.length)
+		full = g_strdup_printf("Installing %s: %s (%u more waiting)", installing->name,
+				       text, install_queue.length);
+	else
+		full = g_strdup_printf("Installing %s: %s", installing->name, text);
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(install_bar), full);
+	if (row_bar)
+		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(row_bar), text);
+	if (inst_pct > 0) {	/* else pulse_tick keeps them moving */
+		gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(install_bar), inst_pct / 100.0);
+		if (row_bar)
+			gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(row_bar), inst_pct / 100.0);
+	}
+	gtk_widget_set_tooltip_text(install_bar, full);
+	gtk_widget_show(install_bar);
+	g_free(text);
+	g_free(full);
+}
+
+/* While no percentage is known yet: show that something happens */
+static gboolean
+pulse_tick(gpointer data)
+{
+	GtkWidget *box;
+
+	if (!installing) {
+		pulse_id = 0;
+		return G_SOURCE_REMOVE;
+	}
+	if (inst_pct <= 0) {
+		gtk_progress_bar_pulse(GTK_PROGRESS_BAR(install_bar));
+		box = g_hash_table_lookup(search_rows, installing->id);
+		if (box && g_object_get_data(G_OBJECT(box), "progress"))
+			gtk_progress_bar_pulse(g_object_get_data(G_OBJECT(box), "progress"));
+	}
+	return G_SOURCE_CONTINUE;
+}
+
+/* (Re)makes the buttons of a Discover row for the app's current state */
+static void
+fill_buttons(GtkWidget *box)
+{
+	const char *id = g_object_get_data(G_OBJECT(box), "id");
+	const char *name = g_object_get_data(G_OBJECT(box), "name");
+	GtkWidget *b;
+
+	clear_list(box);
+	g_object_set_data(G_OBJECT(box), "progress", NULL);
+	if (installing && strcmp(installing->id, id) == 0) {
+		b = gtk_progress_bar_new();
+		gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(b), TRUE);
+		gtk_progress_bar_set_ellipsize(GTK_PROGRESS_BAR(b), PANGO_ELLIPSIZE_END);
+		gtk_widget_set_size_request(b, 180, -1);
+		gtk_widget_set_valign(b, GTK_ALIGN_CENTER);
+		gtk_box_pack_start(GTK_BOX(box), b, FALSE, FALSE, 0);
+		g_object_set_data(G_OBJECT(box), "progress", b);
+	} else if (is_queued(id)) {
+		state_button(box, "Waiting…", id, name);
+	} else if (g_hash_table_contains(installed, id)) {
+		state_button(box, "Installed", id, name);
+		app_button(box, "Open", id, name, G_CALLBACK(on_open), NULL);
+	} else {
+		b = app_button(box, "Install", id, name, G_CALLBACK(on_install),
+			       "suggested-action");
+		g_object_set_data_full(G_OBJECT(b), "remote",
+				       g_strdup(g_object_get_data(G_OBJECT(box), "remote")), g_free);
+	}
+	gtk_widget_show_all(box);
+	if (installing && strcmp(installing->id, id) == 0)
+		show_progress();
+}
+
+static void
+refresh_row(const char *id)
+{
+	GtkWidget *box = g_hash_table_lookup(search_rows, id);
+
+	if (box)
+		fill_buttons(box);
+}
+
+static void
+refresh_rows(void)
+{
+	GHashTableIter it;
+	gpointer box;
+
+	g_hash_table_iter_init(&it, search_rows);
+	while (g_hash_table_iter_next(&it, NULL, &box))
+		fill_buttons(box);
+}
+
+/* Reads flatpak's progress lines: "Installing 2/4… ████ 45%  3.1 MB/s" */
+static void
+install_line(const char *line, gpointer data)
+{
+	static GRegex *step_re, *pct_re;
+	GMatchInfo *m = NULL;
+	char *n;
+
+	if (!step_re) {
+		/* " 2/4" and not "x86_64/50" in a ref */
+		step_re = g_regex_new("(?:^|\\s)(\\d+)/(\\d+)(?=\\s|…|\\.|$)", 0, 0, NULL);
+		pct_re = g_regex_new("(\\d+)%", 0, 0, NULL);
+	}
+	if (g_regex_match(step_re, line, 0, &m)) {
+		n = g_match_info_fetch(m, 1);
+		inst_step = atoi(n);
+		g_free(n);
+		n = g_match_info_fetch(m, 2);
+		inst_steps = atoi(n);
+		g_free(n);
+		inst_pct = 0;
+		g_match_info_free(m);
+		m = NULL;
+		if (g_regex_match(pct_re, line, 0, &m)) {
+			n = g_match_info_fetch(m, 1);
+			inst_pct = CLAMP(atoi(n), 0, 100);
+			g_free(n);
+		}
+		show_progress();
+	}
+	g_match_info_free(m);
+}
+
+static void install_done(gboolean ok, const char *out, const char *err, gpointer data);
+
+static void
+start_next_install(void)
+{
+	installing = g_queue_pop_head(&install_queue);
+	inst_step = inst_steps = inst_pct = 0;
+	if (!installing) {
+		show_progress();
+		return;
+	}
+	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(install_bar), 0);
+	refresh_rows();		/* this one's progress bar, the "more waiting" count */
+	show_progress();
+	if (!pulse_id)
+		pulse_id = g_timeout_add(120, pulse_tick, NULL);
+	/* Not --noninteractive: that one prints no progress */
+	run_host_stream(ARGV("flatpak", "install", "--user", "-y",
+			     installing->remote, installing->id),
+			install_line, install_done, installing);
 }
 
 static void
 install_done(gboolean ok, const char *out, const char *err, gpointer data)
 {
 	AppRef *a = data;
-	char *t;
+	char *t, *why = NULL;
 
-	set_busy(NULL);
+	installing = NULL;
 	if (ok) {
+		g_hash_table_replace(installed, g_strdup(a->id), g_strdup(a->name));
 		add_launcher(a->id, a->name);
 		t = g_strdup_printf("%s is installed and in the Start menu.", a->name);
 		gtk_label_set_text(GTK_LABEL(status), t);
 		g_free(t);
 	} else {
-		char *why = last_line(*err ? err : out);
-
+		why = last_line(*err ? err : out);
+	}
+	refresh_row(a->id);
+	start_next_install();
+	refresh_installed();
+	if (why) {
 		t = g_strdup_printf("Could not install %s", a->name);
 		message(GTK_MESSAGE_ERROR, t, why);
 		g_free(t);
 		g_free(why);
 	}
 	app_ref_free(a);
-	refresh_installed();
 }
 
 static void
 on_install(GtkButton *b, gpointer data)
 {
 	const char *remote = g_object_get_data(G_OBJECT(b), "remote");
-	AppRef *a = app_ref(GTK_WIDGET(b));
-	char *t = g_strdup_printf("Installing %s… (big apps take a few minutes)", a->name);
+	AppRef *a;
 
-	set_busy(t);
-	g_free(t);
-	run_host(ARGV("flatpak", "install", "--user", "--noninteractive", "-y",
-		      remote && *remote ? remote : "flathub", a->id), install_done, a);
+	if ((installing && strcmp(installing->id, BTN_ID(b)) == 0) || is_queued(BTN_ID(b)) ||
+	    g_hash_table_contains(installed, BTN_ID(b)))
+		return;
+	a = app_ref(GTK_WIDGET(b));
+	a->remote = g_strdup(remote && *remote ? remote : "flathub");
+	g_queue_push_tail(&install_queue, a);
+	if (installing) {
+		refresh_row(a->id);
+		show_progress();
+	} else {
+		start_next_install();
+	}
+}
+
+/* Removing or updating while an install runs would fight over flatpak's lock */
+static gboolean
+install_busy(void)
+{
+	if (!installing)
+		return FALSE;
+	message(GTK_MESSAGE_INFO, "An app is being installed",
+		"Try again when the installation is done.");
+	return TRUE;
 }
 
 static void
@@ -663,6 +995,8 @@ on_remove(GtkButton *b, gpointer data)
 	AppRef *a;
 	char *t;
 
+	if (install_busy())
+		return;
 	if (strcmp(BTN_ID(b), APP_ID) == 0 &&
 	    !confirm("Remove the Store itself?",
 		     "You can install it again with apps/hexa-app.", "Remove"))
@@ -729,6 +1063,8 @@ update_done(gboolean ok, const char *out, const char *err, gpointer data)
 static void
 on_update_all(GtkButton *b, gpointer data)
 {
+	if (install_busy())
+		return;
 	set_busy("Updating apps and runtimes…");
 	run_host(ARGV("flatpak", "update", "--user", "--noninteractive", "-y"), update_done, NULL);
 }
@@ -738,13 +1074,20 @@ on_update_all(GtkButton *b, gpointer data)
  */
 
 static void
+clear_search(void)
+{
+	g_hash_table_remove_all(search_rows);
+	clear_list(search_list);
+}
+
+static void
 search_done(gboolean ok, const char *out, const char *err, gpointer data)
 {
 	char ***rows;
 	int i;
 
 	set_busy(NULL);
-	clear_list(search_list);
+	clear_search();
 	if (!ok) {
 		char *why = last_line(*err ? err : out);
 
@@ -765,15 +1108,14 @@ search_done(gboolean ok, const char *out, const char *err, gpointer data)
 		}
 		buttons = app_row(search_list, id, col(rows[i], 1), col(rows[i], 2),
 				  col(rows[i], 4));
-		if (g_hash_table_contains(installed, id)) {
-			app_button(buttons, "Open", id, col(rows[i], 1), G_CALLBACK(on_open), NULL);
-		} else {
-			GtkWidget *b = app_button(buttons, "Install", id, col(rows[i], 1),
-						  G_CALLBACK(on_install), "suggested-action");
-
-			g_object_set_data_full(G_OBJECT(b), "remote",
-					       g_strdup(remotes[0] ? remotes[0] : "flathub"), g_free);
-		}
+		g_object_set_data_full(G_OBJECT(buttons), "id", g_strdup(id), g_free);
+		g_object_set_data_full(G_OBJECT(buttons), "name",
+				       g_strdup(*col(rows[i], 1) ? col(rows[i], 1) : id), g_free);
+		g_object_set_data_full(G_OBJECT(buttons), "remote",
+				       g_strdup(remotes[0] && *remotes[0] ? remotes[0] : "flathub"),
+				       g_free);
+		g_hash_table_replace(search_rows, g_strdup(id), buttons);
+		fill_buttons(buttons);
 		g_strfreev(remotes);
 	}
 	if (!rows[0])
@@ -838,6 +1180,7 @@ installed_done(gboolean ok, const char *out, const char *err, gpointer data)
 		list_note(installed_list, "No apps installed yet: find some in Discover.");
 	free_columns(rows);
 	gtk_widget_show_all(installed_list);
+	refresh_rows();		/* Install / Installed in Discover */
 }
 
 static void
@@ -903,7 +1246,7 @@ flathub_ready(gboolean ok, const char *out, const char *err, gpointer data)
 	if (!ok) {
 		char *why = last_line(*err ? err : out), *t;
 
-		clear_list(search_list);
+		clear_search();
 		t = g_strdup_printf("Could not get Flathub ready (check the internet "
 				    "connection and open the Store again): %s", why);
 		list_note(search_list, t);
@@ -952,6 +1295,23 @@ on_restart_bar(GtkInfoBar *bar, int response, gpointer data)
 	run_host(ARGV("sh", "-c", "kill $(pidof weston)"), ignore_done, NULL);
 }
 
+/* Closing the window stops a running install and drops the waiting ones */
+static gboolean
+on_delete(GtkWidget *w, GdkEvent *ev, gpointer data)
+{
+	char *t;
+	gboolean stay;
+
+	if (!installing)
+		return FALSE;
+	t = g_strdup_printf("%s is still being installed", installing->name);
+	stay = !confirm(t, install_queue.length ?
+			"Closing the Store stops it, and the apps waiting are not installed." :
+			"Closing the Store stops it.", "Close anyway");
+	g_free(t);
+	return stay;
+}
+
 static GtkWidget *
 scrolled_list(GtkWidget **list)
 {
@@ -989,6 +1349,7 @@ activate(GtkApplication *app, gpointer data)
 	win = gtk_application_window_new(app);
 	gtk_window_set_title(GTK_WINDOW(win), "Store");
 	gtk_window_set_default_size(GTK_WINDOW(win), 900, 640);
+	g_signal_connect(win, "delete-event", G_CALLBACK(on_delete), NULL);
 	header = gtk_header_bar_new();
 	gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(header), TRUE);
 	gtk_header_bar_set_title(GTK_HEADER_BAR(header), "Store");
@@ -1056,6 +1417,13 @@ activate(GtkApplication *app, gpointer data)
 	gtk_label_set_ellipsize(GTK_LABEL(status), PANGO_ELLIPSIZE_END);
 	gtk_box_pack_start(GTK_BOX(bar), spinner, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(bar), status, TRUE, TRUE, 0);
+	install_bar = gtk_progress_bar_new();
+	gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(install_bar), TRUE);
+	gtk_progress_bar_set_ellipsize(GTK_PROGRESS_BAR(install_bar), PANGO_ELLIPSIZE_END);
+	gtk_widget_set_size_request(install_bar, 360, -1);
+	gtk_widget_set_valign(install_bar, GTK_ALIGN_CENTER);
+	gtk_widget_set_no_show_all(install_bar, TRUE);
+	gtk_box_pack_end(GTK_BOX(bar), install_bar, FALSE, FALSE, 0);
 	gtk_box_pack_end(GTK_BOX(main_box), bar, FALSE, FALSE, 0);
 	gtk_box_pack_end(GTK_BOX(main_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
 			 FALSE, FALSE, 0);
@@ -1083,6 +1451,7 @@ main(int argc, char **argv)
 	exports = g_build_filename(home, ".local", "share", "flatpak", "exports", "share", NULL);
 	appstream_dir = g_build_filename(home, ".local", "share", "flatpak", "appstream", NULL);
 	installed = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+	search_rows = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
 	/* Without a window: flatpak run com.hexaos.Store --add-to-menu APP_ID */
 	if (argc == 3 && strcmp(argv[1], "--add-to-menu") == 0) {

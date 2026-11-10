@@ -17,6 +17,8 @@ endef
 
 define HEXA_TASKMGR_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/hexa-taskmgr $(TARGET_DIR)/usr/bin/hexa-taskmgr
+	$(INSTALL) -D -m 0755 $(@D)/hexa-taskmgr-helper \
+		$(TARGET_DIR)/usr/libexec/hexa-taskmgr-helper
 endef
 
 $(eval $(generic-package))

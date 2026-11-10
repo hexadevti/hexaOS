@@ -6,7 +6,8 @@
 WIFI_SSID='MyNetwork'
 WIFI_PASSWORD='my-wifi-password'
 
-# Screen scale for every connected screen: 1 = 100%, 2 = 200%, 3 = 300%
+# Screen zoom for every connected screen: 1 = 100%, 1.25 = 125%, 1.5 = 150%,
+# 2 = 200%, 3 = 300% (at 125% and 150% the apps are enlarged, not the taskbar)
 # (leave empty to skip). Takes effect when the desktop restarts.
 SCALE=2
 

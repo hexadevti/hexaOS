@@ -54,10 +54,12 @@ package/hexa-appstream/           newer kernel headers than the toolchain's)
 package/hexa-libfyaml/
 package/hexa-store/               the Store (apps/com.hexaos.Store) built into the system
 patches/                          tweaks to Buildroot packages (splash colors; Weston: Alt+Tab,
-                                  Windows-style taskbar and Start menu with folders, maximize on
+                                  Windows-style taskbar and Start menu with folders (right click
+                                  removes an app), maximize on
                                   the right screen, clipboard keeps plain text, window snapping,
                                   new windows fit their screen, scale fixes, apps reopen on
-                                  the screen they were last on, else on the main screen)
+                                  the screen they were last on, else on the main screen,
+                                  window list for the Task Manager's Apps tab)
 scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
@@ -100,7 +102,7 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Desktop                    | starts automatically (user `hexa`, password `hexa`)     |
 | Text login (root)          | Ctrl+Alt+F2 (root, no password) · back with Ctrl+Alt+F1 |
 | Boot menu                  | hold Esc during boot                                    |
-| Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key), shortcuts, open windows (click shows / minimizes, middle click closes), volume (wheel changes, click mutes), clock |
+| Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key; right-click an app to pin it or remove it from the menu, right-click Start to restore removed apps), shortcuts, open windows (click shows / minimizes, middle click closes), volume (wheel changes, click mutes), clock |
 | Settings                   | Start menu (or `hexa-settings`): network, sound, display, wallpaper and taskbar, keyboard, mouse and touchpad, date and time, power, account, services, about; `hexa-settings-tui` in text mode |
 | Setup (Wi-Fi network...)   | Start menu (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`, checks the internet by reaching Google, sets the screen scale (`SCALE=2` is 200%, applied when the desktop restarts); safe to run again |
 | Restart / shut down        | Start menu > Power (or `hexa-power`): Shut down, Restart or Restart desktop; no password needed (`hexa-power --text` for the text menu) |
@@ -172,6 +174,8 @@ To remove it: delete the two partitions in Disk Management and the "hexaOS" entr
 - Games with kernel anti-cheat (Valorant, Fortnite...) do not run under Wine.
 - On first run Wine creates `~/.wine` (slow) and offers to install Wine Mono (.NET);
   this needs internet. "Cancel" works too.
+- Wine uses the kernel's NTSYNC (`/dev/ntsync`) for faster thread sync in games.
+  Check with a Windows program open: `ls -l /proc/$(pidof wineserver)/fd | grep ntsync`.
 - Docker does not start at boot: `hexa-dev` starts it (asks for the password), or use
   Settings > Services (which can also turn on "start at boot"). `hexa-dev` downloads Ubuntu the first time.
 - Without KVM, the QEMU scripts use `-cpu max,-smap`: with SMAP, QEMU 8.x TCG

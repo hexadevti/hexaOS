@@ -128,8 +128,8 @@ step_scale() {
         return
     fi
     case $SCALE in
-        1|2|3) ;;
-        *) fail "SCALE in $CONF must be 1, 2 or 3 (100%, 200%, 300%); it is \"$SCALE\"."; return ;;
+        1|1.25|1.5|2|3) ;;
+        *) fail "SCALE in $CONF must be 1, 1.25, 1.5, 2 or 3 (100%, 125%, 150%, 200%, 300%); it is \"$SCALE\"."; return ;;
     esac
     # The settings belong to whoever opened Setup (through sudo), not to root
     user=${SUDO_USER:-hexa}

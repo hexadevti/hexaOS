@@ -448,6 +448,39 @@ show_restart_bar(void)
 	gtk_widget_show(restart_bar);
 }
 
+/* Weston (14) only scales a screen by whole numbers: a zoom of 125% or 150%
+ * keeps the screen at 1 and the rest goes to the apps (app_scale) */
+static void
+split_scale(const char *v, int *screen, double *apps)
+{
+	double z = v ? g_ascii_strtod(v, NULL) : 1;
+
+	if (z < 1 || z > 4)
+		z = 1;
+	*screen = (int) z;
+	*apps = z / *screen;
+}
+
+/* session.env: read by hexa-session when the desktop starts (app zoom) */
+static void
+write_session_env(double apps)
+{
+	char *path = g_build_filename(conf_dir, "session.env", NULL);
+
+	if (apps > 1.01) {
+		char buf[G_ASCII_DTOSTR_BUF_SIZE], *txt;
+
+		g_ascii_formatd(buf, sizeof buf, "%.2f", apps);
+		txt = g_strdup_printf("# Written by hexa-settings (Display > Zoom of 125%% "
+				      "or 150%%): size of the apps\napp-scale=%s\n", buf);
+		g_file_set_contents(path, txt, -1, NULL);
+		g_free(txt);
+	} else {
+		g_unlink(path);
+	}
+	g_free(path);
+}
+
 /* Writes desktop.ini: system sections with the user's values on top */
 static void
 write_desktop_ini(void)
@@ -457,6 +490,7 @@ write_desktop_ini(void)
 				  "# Comes before /etc/xdg/weston/weston.ini "
 				  "when the desktop starts.\n");
 	char **groups = g_key_file_get_groups(user_ini, NULL);
+	double app_scale = 1;
 	int i, j;
 
 	for (i = 0; groups[i]; i++) {
@@ -487,13 +521,24 @@ write_desktop_ini(void)
 		for (j = 0; keys[j]; j++) {
 			char *v = g_key_file_get_value(user_ini, g, keys[j], NULL);
 
-			g_string_append_printf(s, "%s=%s\n", keys[j], v ? v : "");
+			if (g_str_has_prefix(g, "output ") && strcmp(keys[j], "scale") == 0) {
+				int screen;
+				double apps;
+
+				split_scale(v, &screen, &apps);
+				if (apps > app_scale)
+					app_scale = apps;
+				g_string_append_printf(s, "scale=%d\n", screen);
+			} else {
+				g_string_append_printf(s, "%s=%s\n", keys[j], v ? v : "");
+			}
 			g_free(v);
 		}
 		g_strfreev(keys);
 	}
 	g_strfreev(groups);
 	g_file_set_contents(desktop_ini_path, s->str, -1, NULL);
+	write_session_env(app_scale);
 	g_string_free(s, TRUE);
 }
 
@@ -1837,10 +1882,13 @@ build_display(void)
 		}
 		g_signal_handlers_unblock_by_func(mode, on_bound_combo, NULL);
 		add_row(list, "Resolution", NULL, mode, NULL);
-		add_row(list, "Scale",
-			"Bigger text and windows. 200% suits sharp laptop screens.",
+		add_row(list, "Zoom",
+			"Bigger text and windows. 200% suits sharp laptop screens. "
+			"At 125% and 150% the apps are enlarged, but the taskbar "
+			"stays at 100%.",
 			bound_combo(group, "scale", "1",
-				    ITEMS("1", "100%", "2", "200%", "3", "300%")), NULL);
+				    ITEMS("1", "100%", "1.25", "125%", "1.5", "150%",
+					  "2", "200%", "3", "300%")), NULL);
 		add_row(list, "Orientation", NULL,
 			bound_combo(group, "transform", "normal",
 				    ITEMS("normal", "Landscape",

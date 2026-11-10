@@ -86,6 +86,9 @@ CONFIG_I2C_CHARDEV=m
 # Wine: allow 16/32-bit Windows programs and emulated system calls
 CONFIG_IA32_EMULATION=y
 CONFIG_MODIFY_LDT_SYSCALL=y
+# Wine: Windows-style sync objects in the kernel (/dev/ntsync), so threads
+# wait on events/mutexes without a round trip to wineserver (faster games)
+CONFIG_NTSYNC=y
 
 # Firefox/VS Code sandbox and rootless containers
 CONFIG_NAMESPACES=y

@@ -2,6 +2,8 @@ config BR2_PACKAGE_HEXA_TASKMGR
 	bool "hexa-taskmgr"
 	depends on BR2_PACKAGE_LIBGTK3
 	help
-	  The hexaOS Task Manager: running programs with their CPU and
-	  memory use (end them from here), and live graphs of CPU, memory,
-	  disk and network use. Opens with Ctrl+Shift+Esc.
+	  The hexaOS Task Manager: the open apps and the running programs
+	  (grouped by name) with their CPU and memory use (end them from
+	  here), live graphs of CPU, memory, disk and network use, and the
+	  system services (start, stop, restart). Opens with Ctrl+Shift+Esc.
+	  The Apps tab needs Weston patch 0008 (the shell's window list).

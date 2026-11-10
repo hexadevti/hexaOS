@@ -1,0 +1,523 @@
+desktop-shell: remove apps from the Start menu (right click)
+
+Right-clicking an app in the Start menu (in the main list or in a folder)
+opens its context menu at the pointer: open it, pin or unpin it on the
+taskbar, and "Remove from Start menu". Removed apps are saved in
+~/.config/hexaos/start-hidden (one launcher name per line, like
+taskbar-pins) and stay out of the menu after restarting the desktop; a
+pinned app stays on the taskbar. A folder whose apps are all removed is
+not shown.
+
+When some app was removed, the Start button's right-click menu gets
+"Restore removed Start apps", which brings every one of them back.
+
+The shell shows one popup at a time, so the Start menu closes first and
+the context menu opens from popups_close_task.
+
+diff --git a/clients/desktop-shell.c b/clients/desktop-shell.c
+index e67e2a9..2b3c782 100644
+--- a/clients/desktop-shell.c
++++ b/clients/desktop-shell.c
+@@ -113,6 +113,7 @@ struct menu_item {
+ 	char *exec_name;	/* program name, also matched against app ids */
+ 	cairo_surface_t *icon;
+ 	bool pinned;		/* also shown on the taskbar */
++	bool hidden;		/* removed from the Start menu (right click) */
+ 	struct custom_env env;
+ 	char * const *argp;
+ 	char * const *envp;
+@@ -153,8 +154,10 @@ struct menu_row {
+ 
+ struct start_menu {
+ 	struct desktop *desktop;
++	struct panel *panel;
+ 	struct window *window;
+ 	struct widget *widget;
++	int x, y;		/* position on the screen */
+ 	int width, height;
+ 	int hover;		/* row under the pointer, -1 for none */
+ 	bool closing;
+@@ -174,6 +177,8 @@ enum ctx_action {
+ 	CTX_CLOSE,
+ 	CTX_TASK_MANAGER,
+ 	CTX_SHOW_DESKTOP,
++	CTX_REMOVE_FROM_START,	/* hide ctx_entry::item from the Start menu */
++	CTX_RESTORE_START,	/* show every removed launcher again */
+ };
+ 
+ #define CTX_MAX_ENTRIES		12
+@@ -181,7 +186,7 @@ enum ctx_action {
+ struct ctx_entry {
+ 	const char *label;
+ 	enum ctx_action action;
+-	struct menu_item *item;	/* for CTX_LAUNCH, CTX_PIN, CTX_UNPIN */
++	struct menu_item *item;	/* CTX_LAUNCH, CTX_PIN, CTX_UNPIN, CTX_REMOVE_* */
+ 	bool enabled;
+ 	bool separator;		/* draw a line above this entry */
+ 	int y, height;		/* position in the menu */
+@@ -230,6 +235,11 @@ struct desktop {
+ 	struct context_menu *ctx;
+ 	struct task popup_close_task;
+ 	bool popup_close_pending;
++	/* right click on a Start menu app: its context menu opens once the
++	 * Start menu is closed (one popup at a time) */
++	struct panel *ctx_pending_panel;
++	struct menu_item *ctx_pending_item;
++	int ctx_pending_x, ctx_pending_y;
+ 	struct volume_state volume;
+ };
+ 
+@@ -337,12 +347,17 @@ enum ctx_kind {
+ 	CTX_FOR_LAUNCHER,	/* a pinned shortcut */
+ 	CTX_FOR_START,		/* the Start button (Win+X menu on Windows) */
+ 	CTX_FOR_TASKBAR,	/* an empty part of the taskbar */
++	CTX_FOR_START_ITEM,	/* an app in the Start menu */
+ };
+ 
+ static void
+ context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
+ 		  struct task_window *win, struct menu_item *item);
+ 
++static void
++context_menu_open_at(struct panel *panel, enum ctx_kind kind, int x, int y,
++		     struct task_window *win, struct menu_item *item);
++
+ static void
+ sigchild_handler(int s)
+ {
+@@ -1663,6 +1678,8 @@ start_menu_build_rows(struct start_menu *menu)
+ 		row->folder = menu->folder;
+ 	}
+ 	wl_list_for_each(item, &menu->desktop->menu_items, link) {
++		if (item->hidden)
++			continue;
+ 		if (menu->folder) {
+ 			if (!item->folder || strcmp(item->folder, menu->folder) != 0)
+ 				continue;
+@@ -1672,7 +1689,7 @@ start_menu_build_rows(struct start_menu *menu)
+ 			wl_list_for_each(other, &menu->desktop->menu_items, link) {
+ 				if (other == item)
+ 					break;
+-				if (other->folder &&
++				if (!other->hidden && other->folder &&
+ 				    strcmp(other->folder, item->folder) == 0) {
+ 					seen = true;
+ 					break;
+@@ -1700,6 +1717,8 @@ start_menu_max_rows(struct desktop *desktop)
+ 	bool first;
+ 
+ 	wl_list_for_each(item, &desktop->menu_items, link) {
++		if (item->hidden)
++			continue;
+ 		if (!item->folder) {
+ 			top++;
+ 			continue;
+@@ -1708,7 +1727,8 @@ start_menu_max_rows(struct desktop *desktop)
+ 		wl_list_for_each(other, &desktop->menu_items, link) {
+ 			if (other == item)
+ 				break;
+-			if (other->folder && strcmp(other->folder, item->folder) == 0)
++			if (!other->hidden && other->folder &&
++			    strcmp(other->folder, item->folder) == 0)
+ 				first = false;
+ 		}
+ 		if (first)
+@@ -1716,11 +1736,12 @@ start_menu_max_rows(struct desktop *desktop)
+ 	}
+ 	max = top;
+ 	wl_list_for_each(item, &desktop->menu_items, link) {
+-		if (!item->folder)
++		if (item->hidden || !item->folder)
+ 			continue;
+ 		in_folder = 1;	/* the Back row */
+ 		wl_list_for_each(other, &desktop->menu_items, link)
+-			if (other->folder && strcmp(other->folder, item->folder) == 0)
++			if (!other->hidden && other->folder &&
++			    strcmp(other->folder, item->folder) == 0)
+ 				in_folder++;
+ 		if (in_folder > max)
+ 			max = in_folder;
+@@ -1906,12 +1927,26 @@ start_menu_button_handler(struct widget *widget, struct input *input,
+ 			  enum wl_pointer_button_state state, void *data)
+ {
+ 	struct start_menu *menu = data;
++	struct desktop *desktop = menu->desktop;
+ 	int32_t x, y;
++	int i;
+ 
+-	if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_RELEASED)
++	if (state != WL_POINTER_BUTTON_STATE_RELEASED)
+ 		return;
+ 	input_get_position(input, &x, &y);
+-	start_menu_activate(menu, start_menu_index_at(menu, x, y));
++	i = start_menu_index_at(menu, x, y);
++	if (button == BTN_LEFT) {
++		start_menu_activate(menu, i);
++	} else if (button == BTN_RIGHT && i >= 0 &&
++		   menu->rows[i].kind == ROW_ITEM && !menu->closing) {
++		/* the app's context menu, where the pointer is: it opens
++		 * when the Start menu is gone (popups_close_task) */
++		desktop->ctx_pending_panel = menu->panel;
++		desktop->ctx_pending_item = menu->rows[i].item;
++		desktop->ctx_pending_x = menu->x + x;
++		desktop->ctx_pending_y = menu->y + y;
++		popups_close(desktop);
++	}
+ }
+ 
+ static void
+@@ -1937,6 +1972,7 @@ start_menu_open(struct panel *panel)
+ 	n = start_menu_max_rows(desktop);
+ 	menu = xzalloc(sizeof *menu);
+ 	menu->desktop = desktop;
++	menu->panel = panel;
+ 	menu->hover = -1;
+ 	start_menu_build_rows(menu);
+ 	menu->width = MENU_WIDTH;
+@@ -1961,6 +1997,8 @@ start_menu_open(struct panel *panel)
+ 		y = panel->output_height - panel->height - menu->height - MENU_PAD;
+ 	if (y < 0)
+ 		y = 0;
++	menu->x = x;
++	menu->y = y;
+ 
+ 	weston_desktop_shell_set_popup(desktop->shell, panel->owner->output,
+ 				       window_get_wl_surface(menu->window),
+@@ -1994,12 +2032,19 @@ popups_close_task(struct task *task, uint32_t events)
+ {
+ 	struct desktop *desktop =
+ 		container_of(task, struct desktop, popup_close_task);
++	struct panel *panel = desktop->ctx_pending_panel;
+ 
+ 	desktop->popup_close_pending = false;
+ 	if (desktop->menu && desktop->menu->closing)
+ 		start_menu_destroy(desktop);
+ 	if (desktop->ctx && desktop->ctx->closing)
+ 		context_menu_destroy(desktop);
++	desktop->ctx_pending_panel = NULL;
++	if (panel)
++		context_menu_open_at(panel, CTX_FOR_START_ITEM,
++				     desktop->ctx_pending_x,
++				     desktop->ctx_pending_y, NULL,
++				     desktop->ctx_pending_item);
+ 	panels_update(desktop);
+ }
+ 
+@@ -2158,6 +2203,27 @@ draw_action_glyph(cairo_t *cr, enum ctx_action action, double x, double y,
+ 		cairo_move_to(cr, x + size / 2 - 4, y + size - m + 1);
+ 		cairo_line_to(cr, x + size / 2 + 4, y + size - m + 1);
+ 		break;
++	case CTX_REMOVE_FROM_START:
++		/* a trash can */
++		cairo_move_to(cr, x + m - 1, y + m + 1);
++		cairo_line_to(cr, x + size - m + 1, y + m + 1);
++		cairo_move_to(cr, x + size / 2 - 2.5, y + m + 1);
++		cairo_line_to(cr, x + size / 2 - 2.5, y + m - 1.5);
++		cairo_line_to(cr, x + size / 2 + 2.5, y + m - 1.5);
++		cairo_line_to(cr, x + size / 2 + 2.5, y + m + 1);
++		cairo_move_to(cr, x + m + 0.5, y + m + 1);
++		cairo_line_to(cr, x + m + 1.5, y + size - m + 1);
++		cairo_line_to(cr, x + size - m - 1.5, y + size - m + 1);
++		cairo_line_to(cr, x + size - m - 0.5, y + m + 1);
++		break;
++	case CTX_RESTORE_START:
++		/* a circular arrow */
++		cairo_arc(cr, x + size / 2, y + size / 2, size / 2 - m,
++			  -M_PI / 2, M_PI);
++		cairo_move_to(cr, x + size / 2 - 3, y + m - 3);
++		cairo_line_to(cr, x + size / 2, y + m);
++		cairo_line_to(cr, x + size / 2 - 3, y + m + 3);
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -2260,6 +2326,9 @@ context_menu_leave_handler(struct widget *widget, struct input *input,
+ static void
+ taskbar_pins_save(struct desktop *desktop);
+ 
++static void
++start_hidden_save(struct desktop *desktop);
++
+ static void
+ taskbar_pins_changed(struct desktop *desktop)
+ {
+@@ -2322,6 +2391,20 @@ context_menu_activate(struct context_menu *ctx, int index)
+ 			taskbar_pins_changed(desktop);
+ 		}
+ 		break;
++	case CTX_REMOVE_FROM_START:
++		if (e->item) {
++			e->item->hidden = true;
++			start_hidden_save(desktop);
++		}
++		break;
++	case CTX_RESTORE_START: {
++		struct menu_item *it;
++
++		wl_list_for_each(it, &desktop->menu_items, link)
++			it->hidden = false;
++		start_hidden_save(desktop);
++		break;
++	}
+ 	case CTX_RESTORE:
+ 		wl_list_for_each(win, &desktop->windows, link) {
+ 			if (win->id != id)
+@@ -2423,7 +2506,21 @@ context_menu_fill(struct context_menu *ctx, enum ctx_kind kind,
+ 		context_menu_add(ctx, "Unpin from taskbar", CTX_UNPIN, item,
+ 				 true);
+ 		break;
+-	case CTX_FOR_START:
++	case CTX_FOR_START_ITEM:
++		context_menu_add(ctx, item->name, CTX_LAUNCH, item, true);
++		if (item->pinned)
++			context_menu_add(ctx, "Unpin from taskbar", CTX_UNPIN,
++					 item, true);
++		else
++			context_menu_add(ctx, "Pin to taskbar", CTX_PIN, item,
++					 true);
++		context_menu_separator(ctx);
++		context_menu_add(ctx, "Remove from Start menu",
++				 CTX_REMOVE_FROM_START, item, true);
++		break;
++	case CTX_FOR_START: {
++		bool any_hidden = false;
++
+ 		context_menu_add(ctx, "Task Manager", CTX_TASK_MANAGER, NULL,
+ 				 true);
+ 		it = item_for_app(desktop, HEXA_SETTINGS_ID);
+@@ -2432,6 +2529,12 @@ context_menu_fill(struct context_menu *ctx, enum ctx_kind kind,
+ 		it = item_for_app(desktop, "foot");
+ 		if (it)
+ 			context_menu_add(ctx, it->name, CTX_LAUNCH, it, true);
++		wl_list_for_each(it, &desktop->menu_items, link)
++			if (it->hidden)
++				any_hidden = true;
++		if (any_hidden)
++			context_menu_add(ctx, "Restore removed Start apps",
++					 CTX_RESTORE_START, NULL, true);
+ 		it = item_for_app(desktop, "hexa-power");
+ 		if (it) {
+ 			context_menu_separator(ctx);
+@@ -2439,6 +2542,7 @@ context_menu_fill(struct context_menu *ctx, enum ctx_kind kind,
+ 					 CTX_LAUNCH, it, true);
+ 		}
+ 		break;
++	}
+ 	case CTX_FOR_TASKBAR:
+ 		context_menu_add(ctx, "Task Manager", CTX_TASK_MANAGER, NULL,
+ 				 true);
+@@ -2449,9 +2553,11 @@ context_menu_fill(struct context_menu *ctx, enum ctx_kind kind,
+ 	}
+ }
+ 
++/* Above the panel at x, or with y >= 0 at (x, y) on the screen (under the
++ * pointer, like a right click in the Start menu) */
+ static void
+-context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
+-		  struct task_window *win, struct menu_item *item)
++context_menu_open_at(struct panel *panel, enum ctx_kind kind, int x, int at_y,
++		     struct task_window *win, struct menu_item *item)
+ {
+ 	struct desktop *desktop = panel->desktop;
+ 	struct context_menu *ctx;
+@@ -2460,7 +2566,7 @@ context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
+ 	if (desktop->shell_version < 2 || !panel->owner)
+ 		return;
+ 	if ((kind == CTX_FOR_WINDOW && !win) ||
+-	    (kind == CTX_FOR_LAUNCHER && !item))
++	    ((kind == CTX_FOR_LAUNCHER || kind == CTX_FOR_START_ITEM) && !item))
+ 		return;
+ 
+ 	popups_destroy_now(desktop);
+@@ -2497,17 +2603,25 @@ context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
+ 				      context_menu_touch_down_handler);
+ 	window_set_buffer_scale(ctx->window, panel->owner->scale);
+ 
+-	/* above the panel, starting at the click and kept on screen */
+-	px = (int) x;
++	/* above the panel (or at the pointer), starting at the click and
++	 * kept on screen */
++	px = x;
+ 	if (px + ctx->width > panel->output_width - MENU_PAD)
+ 		px = panel->output_width - MENU_PAD - ctx->width;
+ 	if (px < MENU_PAD)
+ 		px = MENU_PAD;
+-	if (panel->panel_position == WESTON_DESKTOP_SHELL_PANEL_POSITION_TOP)
++	if (at_y >= 0) {
++		py = at_y;
++		/* open upwards when it does not fit below the pointer */
++		if (py + ctx->height > panel->output_height - MENU_PAD)
++			py = at_y - ctx->height;
++	} else if (panel->panel_position ==
++		   WESTON_DESKTOP_SHELL_PANEL_POSITION_TOP) {
+ 		py = panel->height + MENU_PAD / 2;
+-	else
++	} else {
+ 		py = panel->output_height - panel->height - ctx->height -
+ 		     MENU_PAD / 2;
++	}
+ 	if (py < 0)
+ 		py = 0;
+ 
+@@ -2520,6 +2634,13 @@ context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
+ 	panels_update(desktop);
+ }
+ 
++static void
++context_menu_open(struct panel *panel, enum ctx_kind kind, float x,
++		  struct task_window *win, struct menu_item *item)
++{
++	context_menu_open_at(panel, kind, (int) x, -1, win, item);
++}
++
+ static void
+ context_menu_destroy(struct desktop *desktop)
+ {
+@@ -2539,18 +2660,51 @@ context_menu_destroy(struct desktop *desktop)
+  */
+ 
+ static char *
+-taskbar_pins_path(void)
++hexa_config_path(const char *name)
+ {
+ 	const char *home = getenv("HOME");
+ 	char *path;
+ 
+ 	if (!home || !home[0])
+ 		return NULL;
+-	if (asprintf(&path, "%s/.config/hexaos/taskbar-pins", home) < 0)
++	if (asprintf(&path, "%s/.config/hexaos/%s", home, name) < 0)
+ 		return NULL;
+ 	return path;
+ }
+ 
++/* Opens ~/.config/hexaos/NAME for writing, creating the folders */
++static FILE *
++hexa_config_create(const char *name)
++{
++	char *path = hexa_config_path(name);
++	char *slash, *parent;
++	FILE *f;
++
++	if (!path)
++		return NULL;
++	/* create ~/.config and ~/.config/hexaos */
++	slash = strrchr(path, '/');
++	*slash = '\0';
++	parent = strrchr(path, '/');
++	*parent = '\0';
++	mkdir(path, 0755);
++	*parent = '/';
++	mkdir(path, 0755);
++	*slash = '/';
++
++	f = fopen(path, "w");
++	if (!f)
++		fprintf(stderr, "cannot save %s: %s\n", path, strerror(errno));
++	free(path);
++	return f;
++}
++
++static char *
++taskbar_pins_path(void)
++{
++	return hexa_config_path("taskbar-pins");
++}
++
+ static void
+ taskbar_pins_load(struct desktop *desktop)
+ {
+@@ -2581,33 +2735,58 @@ static void
+ taskbar_pins_save(struct desktop *desktop)
+ {
+ 	struct menu_item *item;
+-	char *path = taskbar_pins_path();
+-	char *slash, *parent;
++	FILE *f = hexa_config_create("taskbar-pins");
++
++	if (!f)
++		return;
++	wl_list_for_each(item, &desktop->menu_items, link)
++		if (item->pinned)
++			fprintf(f, "%s\n", item->name);
++	fclose(f);
++}
++
++/*
++ * Apps removed from the Start menu (right click > Remove from Start menu),
++ * kept in ~/.config/hexaos/start-hidden (one launcher name per line). They
++ * stay on the taskbar if pinned; right click on Start brings them back.
++ */
++
++static void
++start_hidden_load(struct desktop *desktop)
++{
++	struct menu_item *item;
++	char *path = hexa_config_path("start-hidden");
++	char line[256];
+ 	FILE *f;
+ 
+ 	if (!path)
+ 		return;
+-	/* create ~/.config and ~/.config/hexaos */
+-	slash = strrchr(path, '/');
+-	*slash = '\0';
+-	parent = strrchr(path, '/');
+-	*parent = '\0';
+-	mkdir(path, 0755);
+-	*parent = '/';
+-	mkdir(path, 0755);
+-	*slash = '/';
+-
+-	f = fopen(path, "w");
+-	if (!f) {
+-		fprintf(stderr, "cannot save %s: %s\n", path, strerror(errno));
+-		free(path);
++	f = fopen(path, "r");
++	free(path);
++	if (!f)
+ 		return;
++
++	while (fgets(line, sizeof line, f)) {
++		line[strcspn(line, "\r\n")] = '\0';
++		wl_list_for_each(item, &desktop->menu_items, link)
++			if (strcmp(item->name, line) == 0)
++				item->hidden = true;
+ 	}
++	fclose(f);
++}
++
++static void
++start_hidden_save(struct desktop *desktop)
++{
++	struct menu_item *item;
++	FILE *f = hexa_config_create("start-hidden");
++
++	if (!f)
++		return;
+ 	wl_list_for_each(item, &desktop->menu_items, link)
+-		if (item->pinned)
++		if (item->hidden)
+ 			fprintf(f, "%s\n", item->name);
+ 	fclose(f);
+-	free(path);
+ }
+ 
+ /*
+@@ -2729,6 +2908,8 @@ panel_destroy(struct panel *panel)
+ 	struct panel_launcher *tmp;
+ 	struct panel_launcher *launcher;
+ 
++	if (panel->desktop->ctx_pending_panel == panel)
++		panel->desktop->ctx_pending_panel = NULL;
+ 	if (panel->clock)
+ 		panel_destroy_clock(panel->clock);
+ 
+@@ -3820,6 +4001,7 @@ int main(int argc, char *argv[])
+ 	 * this earlier leaks a stale WAYLAND_SOCKET to every launched app. */
+ 	load_menu_items(&desktop);
+ 	taskbar_pins_load(&desktop);
++	start_hidden_load(&desktop);
+ 	/* Volume: read now and every few seconds (changes from other apps) */
+ 	volume_read(&desktop.volume);
+ 	toytimer_init(&desktop.volume.timer, CLOCK_MONOTONIC, desktop.display,

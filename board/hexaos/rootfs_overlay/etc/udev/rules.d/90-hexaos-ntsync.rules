@@ -1,0 +1,2 @@
+# Wine opens /dev/ntsync as the desktop user to use kernel sync objects.
+KERNEL=="ntsync", MODE="0666"

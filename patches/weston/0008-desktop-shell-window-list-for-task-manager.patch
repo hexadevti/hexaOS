@@ -1,0 +1,198 @@
+desktop-shell: publish the window list for the Task Manager
+
+The Task Manager (hexa-taskmgr) shows the open apps in its Apps tab, but
+a Wayland client cannot see other clients' windows. The shell already
+tracks every top-level window for the taskbar; it now also writes them
+to $XDG_RUNTIME_DIR/hexa-windows, one line per window:
+
+    ID<tab>PID<tab>FLAGS<tab>APP-ID<tab>TITLE
+
+ID and FLAGS are the taskbar's (weston_desktop_shell.window). PID is
+the owner process: the Wayland client, or _NET_WM_PID for X11 windows
+(XWayland, Wine); 0 when unknown. Tabs and newlines in titles become
+spaces. The file is rewritten (to a temporary file, then renamed) from
+an idle callback after a change, so a burst of title changes costs a
+single write; it is removed when the shell stops.
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index b4636f1..3f9a42e 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -154,6 +154,7 @@ struct shell_surface {
+ 		uint32_t flags;
+ 		char *title;
+ 		char *app_id;
++		pid_t pid;
+ 	} tb;
+ 
+ 	/* hexaOS, drag a maximized window to restore it (like Windows): the
+@@ -273,6 +274,9 @@ taskbar_update_all(struct desktop_shell *shell);
+ static void
+ taskbar_remove(struct shell_surface *shsurf);
+ 
++static void
++windows_list_changed(struct desktop_shell *shell);
++
+ static void
+ get_maximized_size(struct shell_surface *shsurf, int32_t *width, int32_t *height);
+ 
+@@ -3805,6 +3809,7 @@ taskbar_remove(struct shell_surface *shsurf)
+ 		return;
+ 
+ 	shsurf->tb.shown = false;
++	windows_list_changed(shsurf->shell);
+ 	res = taskbar_resource(shsurf->shell);
+ 	if (res)
+ 		weston_desktop_shell_send_window_removed(res, shsurf->tb.id);
+@@ -3823,6 +3828,7 @@ taskbar_update(struct shell_surface *shsurf)
+ 	struct wl_resource *res;
+ 	const char *title, *app_id;
+ 	uint32_t flags = 0;
++	pid_t pid;
+ 
+ 	if (!taskbar_wants(shsurf)) {
+ 		taskbar_remove(shsurf);
+@@ -3843,7 +3849,11 @@ taskbar_update(struct shell_surface *shsurf)
+ 	if (weston_desktop_surface_get_maximized(shsurf->desktop_surface))
+ 		flags |= WESTON_DESKTOP_SHELL_WINDOW_FLAGS_MAXIMIZED;
+ 
++	/* X11 windows (XWayland) get theirs from _NET_WM_PID, else 0 */
++	pid = weston_desktop_surface_get_pid(shsurf->desktop_surface);
++
+ 	if (shsurf->tb.shown && shsurf->tb.flags == flags &&
++	    shsurf->tb.pid == pid &&
+ 	    str_equal(shsurf->tb.title, title) &&
+ 	    str_equal(shsurf->tb.app_id, app_id))
+ 		return;
+@@ -3860,7 +3870,9 @@ taskbar_update(struct shell_surface *shsurf)
+ 		shsurf->tb.app_id = strdup(app_id);
+ 	}
+ 	shsurf->tb.flags = flags;
++	shsurf->tb.pid = pid;
+ 	shsurf->tb.shown = true;
++	windows_list_changed(shell);
+ 
+ 	res = taskbar_resource(shell);
+ 	if (res)
+@@ -3868,6 +3880,87 @@ taskbar_update(struct shell_surface *shsurf)
+ 						 title, app_id, flags);
+ }
+ 
++/*
++ * The window list for the Task Manager (hexa-taskmgr, Apps tab): one line
++ * per window, "ID<tab>PID<tab>FLAGS<tab>APP-ID<tab>TITLE", in
++ * $XDG_RUNTIME_DIR/hexa-windows. PID is 0 when unknown.
++ */
++
++static void
++windows_list_put(FILE *f, const char *s)
++{
++	for (; *s; s++)
++		fputc(*s == '\t' || *s == '\n' || *s == '\r' ? ' ' : *s, f);
++}
++
++static void
++windows_list_write(void *data)
++{
++	struct desktop_shell *shell = data;
++	struct shell_surface *shsurf;
++	char *tmp;
++	FILE *f;
++
++	shell->hexa.windows_idle = NULL;
++	if (!shell->hexa.windows_path ||
++	    asprintf(&tmp, "%s.new", shell->hexa.windows_path) < 0)
++		return;
++	f = fopen(tmp, "w");
++	if (f) {
++		wl_list_for_each_reverse(shsurf, &shell->shsurf_list, link) {
++			if (!shsurf->tb.shown)
++				continue;
++			fprintf(f, "%u\t%d\t%u\t", shsurf->tb.id,
++				(int) shsurf->tb.pid, shsurf->tb.flags);
++			windows_list_put(f, shsurf->tb.app_id ? shsurf->tb.app_id : "");
++			fputc('\t', f);
++			windows_list_put(f, shsurf->tb.title ? shsurf->tb.title : "");
++			fputc('\n', f);
++		}
++		if (fclose(f) == 0)
++			rename(tmp, shell->hexa.windows_path);
++		else
++			unlink(tmp);
++	}
++	free(tmp);
++}
++
++/* Titles can change many times a second: write once things settle */
++static void
++windows_list_changed(struct desktop_shell *shell)
++{
++	if (!shell->hexa.windows_path || shell->hexa.windows_idle)
++		return;
++	shell->hexa.windows_idle = wl_event_loop_add_idle(
++		wl_display_get_event_loop(shell->compositor->wl_display),
++		windows_list_write, shell);
++}
++
++static void
++windows_list_init(struct desktop_shell *shell)
++{
++	const char *dir = getenv("XDG_RUNTIME_DIR");
++
++	if (!dir || !*dir ||
++	    asprintf(&shell->hexa.windows_path, "%s/hexa-windows", dir) < 0) {
++		shell->hexa.windows_path = NULL;
++		return;
++	}
++	windows_list_write(shell);	/* empty: no windows yet */
++}
++
++static void
++windows_list_free(struct desktop_shell *shell)
++{
++	if (shell->hexa.windows_idle)
++		wl_event_source_remove(shell->hexa.windows_idle);
++	shell->hexa.windows_idle = NULL;
++	if (shell->hexa.windows_path)
++		unlink(shell->hexa.windows_path);
++	free(shell->hexa.windows_path);
++	shell->hexa.windows_path = NULL;
++}
++
+ static void
+ taskbar_update_all(struct desktop_shell *shell)
+ {
+@@ -5816,6 +5909,7 @@ shell_destroy(struct wl_listener *listener, void *data)
+ 	free(shell->client);
+ 	free(shell->hexa.primary_output);
+ 	app_screens_free(shell);
++	windows_list_free(shell);
+ 	free(shell);
+ }
+ 
+@@ -5989,6 +6083,8 @@ wet_shell_init(struct weston_compositor *ec,
+ 
+ 	wl_list_init(&shell->seat_list);
+ 	wl_list_init(&shell->shsurf_list);
++	/* hexaOS: the window list for the Task Manager (needs shsurf_list) */
++	windows_list_init(shell);
+ 	wl_list_init(&shell->output_list);
+ 	wl_list_init(&shell->output_create_listener.link);
+ 	wl_list_init(&shell->output_move_listener.link);
+diff --git a/desktop-shell/shell.h b/desktop-shell/shell.h
+index f5fa0f7..c522533 100644
+--- a/desktop-shell/shell.h
++++ b/desktop-shell/shell.h
+@@ -163,6 +163,12 @@ struct desktop_shell {
+ 		 * in ~/.config/hexaos/window-screens */
+ 		struct wl_list app_screens;
+ 		char *app_screens_path;
++
++		/* the windows on the desktop, for the Task Manager's Apps
++		 * tab: $XDG_RUNTIME_DIR/hexa-windows, rewritten (when idle)
++		 * after each change */
++		char *windows_path;
++		struct wl_event_source *windows_idle;
+ 	} hexa;
+ 
+ 	struct wl_listener seat_create_listener;

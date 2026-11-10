@@ -1,0 +1,45 @@
+#!/bin/sh
+# hexa-taskmgr-helper: what the Task Manager does as administrator. The
+# Task Manager runs it through sudo, after asking for the user's password.
+#
+#   service NAME start|stop|restart
+#       NAME is a script in /etc/init.d, with or without its SNN prefix
+#       (dockerd, S40iwd or iwd). Its output is shown only when it fails.
+
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+die() { echo "$*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || die "hexa-taskmgr-helper must run as root"
+
+[ "${1:-}" = service ] || die "Unknown command: ${1:-}"
+name=${2:-}
+action=${3:-}
+
+case "$name" in
+""|rcS|rcK|.*|*[!A-Za-z0-9._-]*) die "Invalid service: $name" ;;
+esac
+case "$action" in
+start|stop|restart) ;;
+*) die "Unknown action: $action" ;;
+esac
+
+script=""
+if [ -f "/etc/init.d/$name" ]; then
+    script=/etc/init.d/$name
+else
+    for f in /etc/init.d/S[0-9][0-9]"$name"; do
+        [ -f "$f" ] && { script=$f; break; }
+    done
+fi
+[ -n "$script" ] && [ -x "$script" ] || die "Service not found: $name"
+
+# Daemons inherit the script's output: give them a file, not the pipe to
+# the Task Manager, or it would wait for them to exit
+log=$(mktemp) || die "Could not create a temporary file."
+"$script" "$action" >"$log" 2>&1 </dev/null
+status=$?
+[ "$status" -eq 0 ] || cat "$log" >&2
+rm -f "$log"
+exit "$status"

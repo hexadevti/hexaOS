@@ -36,6 +36,20 @@ HEXA_WINE_PRE_CONFIGURE_HOOKS += HEXA_WINE_CHECK_MINGW
 
 HEXA_WINE_CONF_ENV = FREETYPE_CONFIG=$(STAGING_DIR)/usr/bin/freetype-config
 
+# NTSYNC (/dev/ntsync): Wine only uses it when linux/ntsync.h exists at build
+# time, and that header is newer (6.14) than the toolchain's kernel headers.
+# Take it from the kernel we build, in a private include dir so the rest of
+# the toolchain headers are not shadowed.
+ifeq ($(BR2_LINUX_KERNEL),y)
+HEXA_WINE_DEPENDENCIES += linux
+define HEXA_WINE_NTSYNC_HEADER
+	mkdir -p $(HEXA_WINE_DIR)/hexa-include/linux
+	cp $(LINUX_DIR)/include/uapi/linux/ntsync.h $(HEXA_WINE_DIR)/hexa-include/linux/
+endef
+HEXA_WINE_PRE_CONFIGURE_HOOKS += HEXA_WINE_NTSYNC_HEADER
+HEXA_WINE_CONF_ENV += CPPFLAGS="$(TARGET_CPPFLAGS) -I$(HEXA_WINE_DIR)/hexa-include"
+endif
+
 # Buildroot passes --disable-nls (gettext), but in Wine that disables the
 # nls/ directory (locale.nls, l_intl.nls...), without which wineserver fails.
 HEXA_WINE_CONF_OPTS += \

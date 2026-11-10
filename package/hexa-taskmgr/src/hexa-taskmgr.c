@@ -1,15 +1,21 @@
 /*
  * hexa-taskmgr: the hexaOS Task Manager (GTK 3).
  *
+ *   Apps         the apps with windows on the desktop, with the CPU and
+ *                memory of all their processes; end them
  *   Processes    running programs with their CPU and memory use; end them
  *   Performance  live graphs of CPU, memory, disk and network use
+ *   Services     the system services (/etc/init.d); start, stop, restart
  *
  * Opened from the Start menu, by right-clicking the taskbar or the Start
  * button, or with Ctrl+Shift+Esc. Everything is read from /proc and /sys
- * once a second.
+ * once a second. The windows come from the desktop shell, which keeps
+ * them in $XDG_RUNTIME_DIR/hexa-windows (Weston patch 0008); services are
+ * controlled through /usr/libexec/hexa-taskmgr-helper, run with sudo.
  */
 #define _GNU_SOURCE
 #include <gtk/gtk.h>
+#include <gio/gdesktopappinfo.h>
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -30,8 +36,16 @@
 #define HISTORY		60		/* samples in a graph: one a second */
 #define PF_KTHREAD	0x00200000	/* /proc/PID/stat flag of kernel threads */
 #define MAX_STATS	6
+#define INIT_DIR	"/etc/init.d"
+#define HELPER		"/usr/libexec/hexa-taskmgr-helper"
 
 enum { COL_NAME, COL_PID, COL_USER, COL_STATUS, COL_CPU, COL_MEM, N_COLS };
+/* Apps tab: an app row per process with windows, a child row per window
+ * (AC_WINID is 0 on app rows) */
+enum { AC_ICON, AC_NAME, AC_PID, AC_CPU, AC_MEM, AC_WINID, N_ACOLS };
+/* Services tab; SC_STATE: SVC_RUNNING, SVC_STOPPED or SVC_ONESHOT */
+enum { SC_NAME, SC_DESC, SC_STATUS, SC_PID, SC_STARTUP, SC_STATE, N_SCOLS };
+enum { SVC_ONESHOT = -1, SVC_STOPPED = 0, SVC_RUNNING = 1 };
 enum { RES_CPU, RES_MEM, RES_DISK, RES_NET, N_RES };
 
 /* One resource of the Performance tab */
@@ -50,19 +64,75 @@ typedef struct {
 } Res;
 
 typedef struct {
-	int pid;
+	int pid, ppid;
 	unsigned long long ticks;	/* CPU time used so far */
+	double cpu;			/* % in the last second */
+	guint64 mem;			/* resident bytes */
+	char *name;
+	const char *user, *status;	/* not owned */
 	gboolean seen;
-	GtkTreeIter iter;
 } Proc;
+
+/* A row of the Processes tab: the processes of one program. With one
+ * process the row is that process; with more, it adds them up and each
+ * one is a child row (like Chrome's many processes on Windows). */
+typedef struct {
+	GtkTreeIter iter;
+	gboolean seen;
+	GHashTable *kids;		/* pid -> GtkTreeIter * (2+ processes) */
+} Group;
+
+typedef struct {
+	GtkTreeIter iter;
+	gboolean seen;
+} WinRow;
+
+/* A row of the Apps tab: the process that owns some windows (or, when
+ * the process is unknown, a single window) */
+typedef struct {
+	GtkTreeIter iter;
+	gboolean seen;
+	int pid;
+	char *name;
+	GHashTable *wins;		/* window id -> WinRow */
+	int nwins;
+	double cpu;
+	guint64 mem;
+} AppRow;
+
+typedef struct {
+	GtkTreeIter iter;
+	gboolean seen;
+	char *busy;			/* "Starting…" while an action runs */
+} SvcRow;
 
 typedef struct {
 	GtkApplication *gapp;
 	GtkWidget *window, *tree, *search, *end_btn, *status, *menu;
-	GtkListStore *store;
+	GtkTreeStore *store;
 	GtkTreeModel *filter, *sort;
 	GHashTable *procs;		/* pid -> Proc */
+	GHashTable *groups;		/* program name -> Group */
 	GHashTable *users;		/* uid -> user name */
+	GHashTable *comms;		/* program name -> a pid running it */
+	GtkWidget *stack;
+
+	/* Apps tab */
+	GtkWidget *app_tree, *app_end_btn, *app_menu, *app_status;
+	GtkTreeStore *app_store;
+	GtkTreeModel *app_sort;
+	GHashTable *apps;		/* "p<pid>" or "w<window id>" -> AppRow */
+	char *windows_path;
+
+	/* Services tab */
+	GtkWidget *svc_tree, *svc_start, *svc_stop, *svc_restart, *svc_menu;
+	GtkWidget *svc_status;
+	GtkListStore *svc_store;
+	GtkTreeModel *svc_sort;
+	GHashTable *svcs;		/* name -> SvcRow */
+	char *admin_pw;			/* for sudo, once given */
+	gboolean sudo_nopass;		/* sudo needs no password */
+
 	long page_size;
 	int ncpu;
 	guint timer;
@@ -139,6 +209,9 @@ set_stat(Res *r, int i, char *text)	/* takes text */
 		gtk_label_set_text(GTK_LABEL(r->stat[i]), text);
 	g_free(text);
 }
+
+static GtkWidget *styled_label(const char *text, const char *css_class,
+			       float xalign);
 
 static void
 show_error(App *a, const char *primary, const char *secondary)
@@ -268,6 +341,150 @@ process_name(int pid, const char *comm)
 }
 
 static void
+proc_free(gpointer data)
+{
+	Proc *p = data;
+
+	g_free(p->name);
+	g_free(p);
+}
+
+static void
+group_free(gpointer data)
+{
+	Group *g = data;
+
+	g_hash_table_destroy(g->kids);
+	g_free(g);
+}
+
+static void
+set_proc_row(App *a, GtkTreeIter *iter, Proc *p)
+{
+	gtk_tree_store_set(a->store, iter,
+			   COL_NAME, p->name,
+			   COL_PID, p->pid,
+			   COL_USER, p->user,
+			   COL_STATUS, p->status,
+			   COL_CPU, p->cpu,
+			   COL_MEM, p->mem,
+			   -1);
+}
+
+/* Puts the processes in the tree, one top row per program name */
+static void
+update_process_tree(App *a)
+{
+	GHashTable *by_name = g_hash_table_new_full(g_str_hash, g_str_equal,
+		NULL, (GDestroyNotify) g_ptr_array_unref);
+	GHashTableIter it, kit;
+	gpointer key, value;
+
+	g_hash_table_iter_init(&it, a->procs);
+	while (g_hash_table_iter_next(&it, &key, &value)) {
+		Proc *p = value;
+		GPtrArray *list = g_hash_table_lookup(by_name, p->name);
+
+		if (!list) {
+			list = g_ptr_array_new();
+			g_hash_table_insert(by_name, p->name, list);
+		}
+		g_ptr_array_add(list, p);
+	}
+
+	g_hash_table_iter_init(&it, a->groups);
+	while (g_hash_table_iter_next(&it, &key, &value))
+		((Group *) value)->seen = FALSE;
+
+	g_hash_table_iter_init(&it, by_name);
+	while (g_hash_table_iter_next(&it, &key, &value)) {
+		const char *name = key;
+		GPtrArray *list = value;
+		Group *g = g_hash_table_lookup(a->groups, name);
+		const char *user = NULL;
+		double cpu = 0;
+		guint64 mem = 0;
+		char *title;
+		guint i;
+
+		if (!g) {
+			g = g_new0(Group, 1);
+			g->kids = g_hash_table_new_full(g_direct_hash,
+							g_direct_equal, NULL,
+							g_free);
+			gtk_tree_store_append(a->store, &g->iter, NULL);
+			g_hash_table_insert(a->groups, g_strdup(name), g);
+		}
+		g->seen = TRUE;
+
+		if (list->len == 1) {	/* a single process: no child rows */
+			g_hash_table_iter_init(&kit, g->kids);
+			while (g_hash_table_iter_next(&kit, NULL, &value))
+				gtk_tree_store_remove(a->store, value);
+			g_hash_table_remove_all(g->kids);
+			set_proc_row(a, &g->iter, list->pdata[0]);
+			continue;
+		}
+
+		for (i = 0; i < list->len; i++) {
+			Proc *p = list->pdata[i];
+			GtkTreeIter *ci = g_hash_table_lookup(g->kids,
+						GINT_TO_POINTER(p->pid));
+
+			if (!ci) {
+				ci = g_new(GtkTreeIter, 1);
+				gtk_tree_store_append(a->store, ci, &g->iter);
+				g_hash_table_insert(g->kids,
+						    GINT_TO_POINTER(p->pid), ci);
+			}
+			set_proc_row(a, ci, p);
+			cpu += p->cpu;
+			mem += p->mem;
+			if (i == 0)
+				user = p->user;
+			else if (user && strcmp(user, p->user) != 0)
+				user = NULL;	/* several users */
+		}
+		/* child rows of processes that ended or became another program */
+		g_hash_table_iter_init(&kit, g->kids);
+		while (g_hash_table_iter_next(&kit, &key, &value)) {
+			Proc *p = g_hash_table_lookup(a->procs, key);
+
+			if (!p || strcmp(p->name, name) != 0) {
+				gtk_tree_store_remove(a->store, value);
+				g_hash_table_iter_remove(&kit);
+			}
+		}
+
+		title = g_strdup_printf("%s (%u)", name, list->len);
+		gtk_tree_store_set(a->store, &g->iter,
+				   COL_NAME, title,
+				   COL_PID, 0,
+				   COL_USER, user ? user : "",
+				   COL_STATUS, "",
+				   COL_CPU, MIN(cpu, 100.0),
+				   COL_MEM, mem,
+				   -1);
+		g_free(title);
+	}
+
+	g_hash_table_iter_init(&it, a->groups);
+	while (g_hash_table_iter_next(&it, &key, &value)) {
+		Group *g = value;
+
+		if (!g->seen) {
+			gtk_tree_store_remove(a->store, &g->iter);
+			g_hash_table_iter_remove(&it);
+		}
+	}
+	g_hash_table_destroy(by_name);
+
+	/* a search by PID must also show the group of a new process */
+	if (gtk_entry_get_text(GTK_ENTRY(a->search))[0])
+		gtk_tree_model_filter_refilter(GTK_TREE_MODEL_FILTER(a->filter));
+}
+
+static void
 scan_processes(App *a, unsigned long long dtotal, int *nprocs, int *nthreads)
 {
 	GHashTableIter it;
@@ -279,19 +496,20 @@ scan_processes(App *a, unsigned long long dtotal, int *nprocs, int *nthreads)
 	g_hash_table_iter_init(&it, a->procs);
 	while (g_hash_table_iter_next(&it, &key, &value))
 		((Proc *) value)->seen = FALSE;
+	g_hash_table_remove_all(a->comms);
 
 	d = opendir("/proc");
 	if (!d)
 		return;
 	while ((de = readdir(d))) {
-		char path[64], comm[64], state, *stat, *lp, *rp, *name;
+		char path[64], comm[64], state, *stat, *lp, *rp;
 		unsigned long flags;
 		unsigned long long ut, st, ticks;
 		long threads, rss;
 		struct stat sb;
 		double cpu = 0;
 		Proc *p;
-		int pid;
+		int pid, ppid;
 
 		if (!isdigit((unsigned char) de->d_name[0]))
 			continue;
@@ -303,9 +521,9 @@ scan_processes(App *a, unsigned long long dtotal, int *nprocs, int *nthreads)
 		lp = strchr(stat, '(');
 		rp = strrchr(stat, ')');
 		if (!lp || !rp || rp < lp ||
-		    sscanf(rp + 2, "%c %*d %*d %*d %*d %*d %lu %*u %*u %*u %*u "
+		    sscanf(rp + 2, "%c %d %*d %*d %*d %*d %lu %*u %*u %*u %*u "
 			   "%llu %llu %*d %*d %*d %*d %ld %*d %*u %*u %ld",
-			   &state, &flags, &ut, &st, &threads, &rss) != 6) {
+			   &state, &ppid, &flags, &ut, &st, &threads, &rss) != 7) {
 			g_free(stat);
 			continue;
 		}
@@ -317,6 +535,9 @@ scan_processes(App *a, unsigned long long dtotal, int *nprocs, int *nthreads)
 
 		(*nprocs)++;
 		*nthreads += threads;
+		/* for the Services tab: is this daemon running? */
+		g_hash_table_replace(a->comms, g_strdup(comm),
+				     GINT_TO_POINTER(pid));
 
 		snprintf(path, sizeof path, "/proc/%d", pid);
 		if (lstat(path, &sb) < 0)
@@ -331,35 +552,27 @@ scan_processes(App *a, unsigned long long dtotal, int *nprocs, int *nthreads)
 		if (!p) {
 			p = g_new0(Proc, 1);
 			p->pid = pid;
-			gtk_list_store_append(a->store, &p->iter);
 			g_hash_table_insert(a->procs, GINT_TO_POINTER(pid), p);
 		}
+		p->ppid = ppid;
 		p->ticks = ticks;
 		p->seen = TRUE;
-
-		name = process_name(pid, comm);
-		gtk_list_store_set(a->store, &p->iter,
-				   COL_NAME, name,
-				   COL_PID, pid,
-				   COL_USER, user_name(a, sb.st_uid),
-				   COL_STATUS, status_text(state),
-				   COL_CPU, cpu,
-				   COL_MEM, (guint64) (rss > 0 ? rss : 0) * a->page_size,
-				   -1);
-		g_free(name);
+		p->cpu = cpu;
+		p->mem = (guint64) (rss > 0 ? rss : 0) * a->page_size;
+		p->user = user_name(a, sb.st_uid);
+		p->status = status_text(state);
+		g_free(p->name);
+		p->name = process_name(pid, comm);
 	}
 	closedir(d);
 
 	/* forget the processes that ended */
 	g_hash_table_iter_init(&it, a->procs);
-	while (g_hash_table_iter_next(&it, &key, &value)) {
-		Proc *p = value;
-
-		if (!p->seen) {
-			gtk_list_store_remove(a->store, &p->iter);
+	while (g_hash_table_iter_next(&it, &key, &value))
+		if (!((Proc *) value)->seen)
 			g_hash_table_iter_remove(&it);
-		}
-	}
+
+	update_process_tree(a);
 }
 
 typedef struct {
@@ -511,6 +724,9 @@ uptime_text(void)
  * The once-a-second refresh
  */
 
+static void refresh_apps(App *a);
+static void refresh_services(App *a);
+
 static unsigned long long
 delta(unsigned long long now, unsigned long long before)
 {
@@ -540,6 +756,8 @@ refresh(gpointer data)
 	sample_mem(&m);
 	a->mem_total = m.total;
 	scan_processes(a, dtotal, &nprocs, &nthreads);
+	refresh_apps(a);
+	refresh_services(a);
 	sample_disk(&di);
 	sample_net(&ni);
 
@@ -681,35 +899,26 @@ refresh(gpointer data)
  * Processes tab
  */
 
-static int
-selected_pid(App *a, char **name)
-{
-	GtkTreeSelection *sel =
-		gtk_tree_view_get_selection(GTK_TREE_VIEW(a->tree));
-	GtkTreeModel *model;
-	GtkTreeIter iter;
-	int pid = 0;
-
-	*name = NULL;
-	if (!gtk_tree_selection_get_selected(sel, &model, &iter))
-		return 0;
-	gtk_tree_model_get(model, &iter, COL_PID, &pid, COL_NAME, name, -1);
-	return pid;
-}
-
+/* Sends SIG to the processes; reports the first one that cannot be ended */
 static void
-end_selected(App *a, int sig)
+end_pids(App *a, GArray *pids, const char *name, int sig)
 {
-	char *name, *msg;
-	int pid = selected_pid(a, &name);
+	char *msg = NULL;
+	guint i;
 
-	if (pid <= 0)
-		return;
-	if (pid == 1) {
-		show_error(a, "This process cannot be ended.",
-			   "It is the first process of the system (init): "
-			   "ending it would stop the computer.");
-	} else if (kill(pid, sig) < 0) {
+	for (i = 0; i < pids->len; i++) {
+		int pid = g_array_index(pids, int, i);
+
+		if (pid <= 0)
+			continue;
+		if (pid == 1) {
+			show_error(a, "This process cannot be ended.",
+				   "It is the first process of the system (init): "
+				   "ending it would stop the computer.");
+			return;
+		}
+		if (kill(pid, sig) == 0 || errno == ESRCH || msg)
+			continue;
 		if (errno == EPERM)
 			msg = g_strdup_printf("You do not have permission to end "
 					      "\"%s\" (PID %d). It belongs to "
@@ -718,9 +927,48 @@ end_selected(App *a, int sig)
 		else
 			msg = g_strdup_printf("\"%s\" (PID %d): %s", name, pid,
 					      g_strerror(errno));
+	}
+	if (msg) {
 		show_error(a, "Could not end the task.", msg);
 		g_free(msg);
 	}
+}
+
+/* The selected row's processes: the row's own, or all of its group's */
+static GArray *
+selected_pids(GtkWidget *tree, int pid_col, int name_col, char **name)
+{
+	GtkTreeSelection *sel =
+		gtk_tree_view_get_selection(GTK_TREE_VIEW(tree));
+	GArray *pids = g_array_new(FALSE, FALSE, sizeof(int));
+	GtkTreeModel *model;
+	GtkTreeIter iter, child;
+	int pid = 0;
+
+	*name = NULL;
+	if (!gtk_tree_selection_get_selected(sel, &model, &iter))
+		return pids;
+	gtk_tree_model_get(model, &iter, pid_col, &pid, name_col, name, -1);
+	if (pid > 0) {
+		g_array_append_val(pids, pid);
+	} else if (gtk_tree_model_iter_children(model, &child, &iter)) {
+		do {
+			gtk_tree_model_get(model, &child, pid_col, &pid, -1);
+			if (pid > 0)
+				g_array_append_val(pids, pid);
+		} while (gtk_tree_model_iter_next(model, &child));
+	}
+	return pids;
+}
+
+static void
+end_selected(App *a, int sig)
+{
+	char *name;
+	GArray *pids = selected_pids(a->tree, COL_PID, COL_NAME, &name);
+
+	end_pids(a, pids, name ? name : "", sig);
+	g_array_free(pids, TRUE);
 	g_free(name);
 }
 
@@ -774,19 +1022,17 @@ static void
 on_search_changed(GtkSearchEntry *e, App *a)
 {
 	gtk_tree_model_filter_refilter(GTK_TREE_MODEL_FILTER(a->filter));
+	if (gtk_entry_get_text(GTK_ENTRY(e))[0])
+		gtk_tree_view_expand_all(GTK_TREE_VIEW(a->tree));
 }
 
 static gboolean
-row_visible(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+row_matches(GtkTreeModel *model, GtkTreeIter *iter, const char *text)
 {
-	App *a = data;
-	const char *text = gtk_entry_get_text(GTK_ENTRY(a->search));
 	char *name = NULL, *user = NULL, *needle, *hay, pidbuf[16];
 	gboolean ok;
 	int pid;
 
-	if (!text[0])
-		return TRUE;
 	gtk_tree_model_get(model, iter, COL_NAME, &name, COL_PID, &pid,
 			   COL_USER, &user, -1);
 	if (!name) {		/* a row being added */
@@ -796,13 +1042,35 @@ row_visible(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
 	needle = g_utf8_casefold(text, -1);
 	hay = g_utf8_casefold(name, -1);
 	snprintf(pidbuf, sizeof pidbuf, "%d", pid);
-	ok = strstr(hay, needle) || g_str_has_prefix(pidbuf, text) ||
+	ok = strstr(hay, needle) || (pid > 0 && g_str_has_prefix(pidbuf, text)) ||
 	     (user && g_ascii_strcasecmp(user, text) == 0);
 	g_free(hay);
 	g_free(needle);
 	g_free(name);
 	g_free(user);
 	return ok;
+}
+
+/* A group is shown when it or one of its processes matches; a process
+ * when it or its group does */
+static gboolean
+row_visible(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	App *a = data;
+	const char *text = gtk_entry_get_text(GTK_ENTRY(a->search));
+	GtkTreeIter other;
+
+	if (!text[0] || row_matches(model, iter, text))
+		return TRUE;
+	if (gtk_tree_model_iter_parent(model, &other, iter))
+		return row_matches(model, &other, text);
+	if (gtk_tree_model_iter_children(model, &other, iter)) {
+		do {
+			if (row_matches(model, &other, text))
+				return TRUE;
+		} while (gtk_tree_model_iter_next(model, &other));
+	}
+	return FALSE;
 }
 
 static gint
@@ -849,6 +1117,20 @@ cpu_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell, GtkTreeModel *model,
 	set_heat(cell, v / 100);
 }
 
+/* Group rows have no PID of their own */
+static void
+pid_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell, GtkTreeModel *model,
+	 GtkTreeIter *iter, gpointer data)
+{
+	char buf[16] = "";
+	int pid = 0;
+
+	gtk_tree_model_get(model, iter, COL_PID, &pid, -1);
+	if (pid > 0)
+		snprintf(buf, sizeof buf, "%d", pid);
+	g_object_set(cell, "text", buf, NULL);
+}
+
 static void
 mem_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell, GtkTreeModel *model,
 	 GtkTreeIter *iter, gpointer data)
@@ -864,33 +1146,15 @@ mem_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell, GtkTreeModel *model,
 	set_heat(cell, a->mem_total ? (double) v / a->mem_total * 4 : 0);
 }
 
+static GtkTreeViewColumn *text_column(GtkWidget *tree, const char *title,
+	int col, gboolean right, GtkTreeCellDataFunc func, gpointer data,
+	gboolean expand);
+
 static void
 add_column(App *a, const char *title, int col, gboolean right,
 	   GtkTreeCellDataFunc func, gboolean expand)
 {
-	GtkCellRenderer *cell = gtk_cell_renderer_text_new();
-	GtkTreeViewColumn *c = gtk_tree_view_column_new();
-
-	if (right)
-		g_object_set(cell, "xalign", 1.0, NULL);
-	else
-		g_object_set(cell, "ellipsize", PANGO_ELLIPSIZE_END, NULL);
-	gtk_tree_view_column_set_title(c, title);
-	gtk_tree_view_column_pack_start(c, cell, TRUE);
-	if (func)
-		gtk_tree_view_column_set_cell_data_func(c, cell, func, a, NULL);
-	else
-		gtk_tree_view_column_add_attribute(c, cell, "text", col);
-	gtk_tree_view_column_set_sort_column_id(c, col);
-	gtk_tree_view_column_set_resizable(c, TRUE);
-	gtk_tree_view_column_set_expand(c, expand);
-	if (right) {
-		gtk_tree_view_column_set_alignment(c, 1.0);
-		gtk_tree_view_column_set_min_width(c, 90);
-	} else if (!expand) {
-		gtk_tree_view_column_set_min_width(c, 110);
-	}
-	gtk_tree_view_append_column(GTK_TREE_VIEW(a->tree), c);
+	text_column(a->tree, title, col, right, func, a, expand);
 }
 
 static void
@@ -954,7 +1218,8 @@ build_processes(App *a)
 	gtk_widget_set_sensitive(a->end_btn, FALSE);
 	gtk_widget_set_tooltip_text(a->end_btn,
 		"Asks the program to close (Delete). "
-		"Shift+Delete forces it to stop.");
+		"Shift+Delete forces it to stop. "
+		"On a group, ends all of its processes.");
 	g_signal_connect(a->end_btn, "clicked", G_CALLBACK(on_end_clicked), a);
 	gtk_box_pack_end(GTK_BOX(bar), a->end_btn, FALSE, FALSE, 0);
 
@@ -963,7 +1228,7 @@ build_processes(App *a)
 	gtk_box_pack_end(GTK_BOX(bar), run, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(box), bar, FALSE, FALSE, 0);
 
-	a->store = gtk_list_store_new(N_COLS, G_TYPE_STRING, G_TYPE_INT,
+	a->store = gtk_tree_store_new(N_COLS, G_TYPE_STRING, G_TYPE_INT,
 				      G_TYPE_STRING, G_TYPE_STRING,
 				      G_TYPE_DOUBLE, G_TYPE_UINT64);
 	a->filter = gtk_tree_model_filter_new(GTK_TREE_MODEL(a->store), NULL);
@@ -978,7 +1243,7 @@ build_processes(App *a)
 	a->tree = gtk_tree_view_new_with_model(a->sort);
 	gtk_tree_view_set_enable_search(GTK_TREE_VIEW(a->tree), FALSE);
 	add_column(a, "Name", COL_NAME, FALSE, NULL, TRUE);
-	add_column(a, "PID", COL_PID, TRUE, NULL, FALSE);
+	add_column(a, "PID", COL_PID, TRUE, pid_cell, FALSE);
 	add_column(a, "User", COL_USER, FALSE, NULL, FALSE);
 	add_column(a, "Status", COL_STATUS, FALSE, NULL, FALSE);
 	add_column(a, "CPU", COL_CPU, TRUE, cpu_cell, FALSE);
@@ -1014,6 +1279,1204 @@ build_processes(App *a)
 	gtk_style_context_add_class(gtk_widget_get_style_context(a->status),
 				    "tm-status");
 	gtk_box_pack_start(GTK_BOX(box), a->status, FALSE, FALSE, 0);
+	return box;
+}
+
+/*
+ * Apps tab
+ */
+
+static void
+app_row_free(gpointer data)
+{
+	AppRow *r = data;
+
+	g_free(r->name);
+	g_hash_table_destroy(r->wins);
+	g_free(r);
+}
+
+static GDesktopAppInfo *
+desktop_file(const char *id)
+{
+	char *file = g_strdup_printf("%s.desktop", id);
+	GDesktopAppInfo *info = g_desktop_app_info_new(file);
+
+	g_free(file);
+	return info;
+}
+
+/* The app's name and icon: from its .desktop file (by app id, then by
+ * program name), else its window title */
+static char *
+app_info(const char *app_id, int pid, const char *title, GIcon **icon)
+{
+	GDesktopAppInfo *info = NULL;
+	char *comm = NULL, *name;
+
+	if (app_id[0]) {
+		info = desktop_file(app_id);
+		if (!info) {
+			char *lower = g_ascii_strdown(app_id, -1);
+
+			info = desktop_file(lower);
+			g_free(lower);
+		}
+	}
+	if (pid > 0) {
+		char path[64];
+
+		snprintf(path, sizeof path, "/proc/%d/comm", pid);
+		comm = read_file(path);
+		if (comm)
+			g_strstrip(comm);
+	}
+	if (!info && comm && comm[0])
+		info = desktop_file(comm);
+
+	*icon = NULL;
+	if (info) {
+		GIcon *i = g_app_info_get_icon(G_APP_INFO(info));
+
+		name = g_strdup(g_app_info_get_name(G_APP_INFO(info)));
+		if (i)
+			*icon = g_object_ref(i);
+		g_object_unref(info);
+	} else {
+		name = g_strdup(title[0] ? title : app_id[0] ? app_id :
+				comm && comm[0] ? comm : "Unknown app");
+	}
+	if (!*icon)
+		*icon = g_themed_icon_new("application-x-executable");
+	g_free(comm);
+	return name;
+}
+
+static void
+app_key(char *buf, gsize size, int pid, guint id)
+{
+	if (pid > 0)
+		snprintf(buf, size, "p%d", pid);
+	else
+		snprintf(buf, size, "w%u", id);
+}
+
+/* Reads the desktop's windows and updates the Apps tab */
+static void
+refresh_apps(App *a)
+{
+	char *data = a->windows_path ? read_file(a->windows_path) : NULL;
+	char **lines, **l, key[24], *text;
+	GHashTableIter it, wit;
+	gpointer k, value;
+	int nwins = 0;
+
+	g_hash_table_iter_init(&it, a->apps);
+	while (g_hash_table_iter_next(&it, &k, &value)) {
+		AppRow *r = value;
+
+		r->seen = FALSE;
+		r->nwins = 0;
+		r->cpu = 0;
+		r->mem = 0;
+		g_hash_table_iter_init(&wit, r->wins);
+		while (g_hash_table_iter_next(&wit, NULL, &value))
+			((WinRow *) value)->seen = FALSE;
+	}
+
+	lines = g_strsplit(data ? data : "", "\n", -1);
+	for (l = lines; *l; l++) {
+		char **f = g_strsplit(*l, "\t", 5);
+		const char *app_id, *title;
+		AppRow *r;
+		WinRow *w;
+		guint id;
+		int pid;
+
+		if (g_strv_length(f) != 5) {
+			g_strfreev(f);
+			continue;
+		}
+		id = (guint) g_ascii_strtoull(f[0], NULL, 10);
+		pid = atoi(f[1]);
+		app_id = f[3];
+		title = f[4];
+
+		app_key(key, sizeof key, pid, id);
+		r = g_hash_table_lookup(a->apps, key);
+		if (!r) {
+			GIcon *icon;
+
+			r = g_new0(AppRow, 1);
+			r->pid = pid;
+			r->wins = g_hash_table_new_full(g_direct_hash,
+							g_direct_equal, NULL,
+							g_free);
+			r->name = app_info(app_id, pid, title, &icon);
+			gtk_tree_store_append(a->app_store, &r->iter, NULL);
+			gtk_tree_store_set(a->app_store, &r->iter,
+					   AC_ICON, icon, AC_PID, pid,
+					   AC_WINID, 0, -1);
+			g_object_unref(icon);
+			g_hash_table_insert(a->apps, g_strdup(key), r);
+		}
+		r->seen = TRUE;
+		r->nwins++;
+		nwins++;
+
+		w = g_hash_table_lookup(r->wins, GUINT_TO_POINTER(id));
+		if (!w) {
+			w = g_new0(WinRow, 1);
+			gtk_tree_store_append(a->app_store, &w->iter, &r->iter);
+			g_hash_table_insert(r->wins, GUINT_TO_POINTER(id), w);
+		}
+		w->seen = TRUE;
+		gtk_tree_store_set(a->app_store, &w->iter,
+				   AC_NAME, title[0] ? title : r->name,
+				   AC_PID, pid, AC_WINID, id, -1);
+		g_strfreev(f);
+	}
+	g_strfreev(lines);
+
+	/* forget the windows and apps that closed */
+	g_hash_table_iter_init(&it, a->apps);
+	while (g_hash_table_iter_next(&it, &k, &value)) {
+		AppRow *r = value;
+
+		if (!r->seen) {
+			gtk_tree_store_remove(a->app_store, &r->iter);
+			g_hash_table_iter_remove(&it);
+			continue;
+		}
+		g_hash_table_iter_init(&wit, r->wins);
+		while (g_hash_table_iter_next(&wit, NULL, &value)) {
+			WinRow *w = value;
+
+			if (!w->seen) {
+				gtk_tree_store_remove(a->app_store, &w->iter);
+				g_hash_table_iter_remove(&wit);
+			}
+		}
+	}
+
+	/* each process counts for the nearest app above it (a browser's
+	 * helpers, a Flatpak app inside its sandbox) */
+	g_hash_table_iter_init(&it, a->procs);
+	while (g_hash_table_iter_next(&it, &k, &value)) {
+		Proc *p = value, *up = p;
+		int depth;
+
+		for (depth = 0; up && depth < 64; depth++) {
+			AppRow *r;
+
+			app_key(key, sizeof key, up->pid, 0);
+			r = g_hash_table_lookup(a->apps, key);
+			if (r) {
+				r->cpu += p->cpu;
+				r->mem += p->mem;
+				break;
+			}
+			up = up->ppid > 0 ? g_hash_table_lookup(a->procs,
+					GINT_TO_POINTER(up->ppid)) : NULL;
+		}
+	}
+
+	g_hash_table_iter_init(&it, a->apps);
+	while (g_hash_table_iter_next(&it, &k, &value)) {
+		AppRow *r = value;
+
+		text = r->nwins > 1 ? g_strdup_printf("%s (%d)", r->name, r->nwins)
+				    : g_strdup(r->name);
+		gtk_tree_store_set(a->app_store, &r->iter,
+				   AC_NAME, text,
+				   AC_CPU, MIN(r->cpu, 100.0),
+				   AC_MEM, r->mem, -1);
+		g_free(text);
+	}
+
+	if (!data)
+		text = g_strdup("The desktop did not share its window list: "
+				"restart the session after updating hexaOS.");
+	else
+		text = g_strdup_printf("Apps: %u    Windows: %d",
+				       g_hash_table_size(a->apps), nwins);
+	gtk_label_set_text(GTK_LABEL(a->app_status), text);
+	g_free(text);
+	g_free(data);
+}
+
+/* Window rows only show their title */
+static gboolean
+is_window_row(GtkTreeModel *model, GtkTreeIter *iter)
+{
+	guint id = 0;
+
+	gtk_tree_model_get(model, iter, AC_WINID, &id, -1);
+	return id != 0;
+}
+
+static void
+app_cpu_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell,
+	     GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	char buf[32] = "";
+	double v = 0;
+
+	if (!is_window_row(model, iter)) {
+		gtk_tree_model_get(model, iter, AC_CPU, &v, -1);
+		snprintf(buf, sizeof buf, "%.1f%%", v);
+	}
+	g_object_set(cell, "text", buf, NULL);
+	set_heat(cell, v / 100);
+}
+
+static void
+app_mem_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell,
+	     GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	App *a = data;
+	guint64 v = 0;
+	char *s;
+
+	if (is_window_row(model, iter)) {
+		g_object_set(cell, "text", "", NULL);
+		set_heat(cell, 0);
+		return;
+	}
+	gtk_tree_model_get(model, iter, AC_MEM, &v, -1);
+	s = fmt_size(v);
+	g_object_set(cell, "text", s, NULL);
+	g_free(s);
+	set_heat(cell, a->mem_total ? (double) v / a->mem_total * 4 : 0);
+}
+
+static void
+app_pid_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell,
+	     GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	char buf[16] = "";
+	int pid = 0;
+
+	if (!is_window_row(model, iter))
+		gtk_tree_model_get(model, iter, AC_PID, &pid, -1);
+	if (pid > 0)
+		snprintf(buf, sizeof buf, "%d", pid);
+	g_object_set(cell, "text", buf, NULL);
+}
+
+static int
+app_selected_pid(App *a, char **name)
+{
+	GtkTreeSelection *sel =
+		gtk_tree_view_get_selection(GTK_TREE_VIEW(a->app_tree));
+	GtkTreeModel *model;
+	GtkTreeIter iter, parent;
+	int pid = 0;
+
+	*name = NULL;
+	if (!gtk_tree_selection_get_selected(sel, &model, &iter))
+		return 0;
+	if (gtk_tree_model_iter_parent(model, &parent, &iter))
+		iter = parent;	/* a window: its app */
+	gtk_tree_model_get(model, &iter, AC_PID, &pid, AC_NAME, name, -1);
+	return pid;
+}
+
+static void
+app_end(App *a, int sig)
+{
+	GArray *pids = g_array_new(FALSE, FALSE, sizeof(int));
+	char *name;
+	int pid = app_selected_pid(a, &name);
+
+	if (pid > 0) {
+		g_array_append_val(pids, pid);
+		end_pids(a, pids, name, sig);
+	}
+	g_array_free(pids, TRUE);
+	g_free(name);
+}
+
+static void
+on_app_end_clicked(GtkWidget *w, App *a)
+{
+	app_end(a, SIGTERM);
+}
+
+static void
+on_app_kill_activate(GtkWidget *w, App *a)
+{
+	app_end(a, SIGKILL);
+}
+
+/* "Go to details": the app's processes in the Processes tab */
+static void
+on_app_details_activate(GtkWidget *w, App *a)
+{
+	char *name, buf[16];
+	int pid = app_selected_pid(a, &name);
+
+	g_free(name);
+	if (pid <= 0)
+		return;
+	snprintf(buf, sizeof buf, "%d", pid);
+	gtk_stack_set_visible_child_name(GTK_STACK(a->stack), "processes");
+	gtk_entry_set_text(GTK_ENTRY(a->search), buf);
+	gtk_widget_grab_focus(a->tree);
+}
+
+static void
+on_app_selection_changed(GtkTreeSelection *sel, App *a)
+{
+	char *name;
+	int pid = app_selected_pid(a, &name);
+
+	g_free(name);
+	gtk_widget_set_sensitive(a->app_end_btn, pid > 0);
+	gtk_widget_set_tooltip_text(a->app_end_btn,
+		pid > 0 || !gtk_tree_selection_get_selected(sel, NULL, NULL) ?
+		"Asks the app to close (Delete). Shift+Delete forces it to stop." :
+		"The process of this window is not known, so it cannot be "
+		"ended from here: close the window instead.");
+}
+
+static gboolean
+on_app_tree_button(GtkWidget *w, GdkEventButton *ev, App *a)
+{
+	GtkTreePath *path;
+
+	if (ev->type != GDK_BUTTON_PRESS || ev->button != GDK_BUTTON_SECONDARY)
+		return FALSE;
+	if (!gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(a->app_tree), ev->x,
+					   ev->y, &path, NULL, NULL, NULL))
+		return FALSE;
+	gtk_tree_selection_select_path(
+		gtk_tree_view_get_selection(GTK_TREE_VIEW(a->app_tree)), path);
+	gtk_tree_path_free(path);
+	if (gtk_widget_get_sensitive(a->app_end_btn))
+		gtk_menu_popup_at_pointer(GTK_MENU(a->app_menu), (GdkEvent *) ev);
+	return TRUE;
+}
+
+static gboolean
+on_app_tree_key(GtkWidget *w, GdkEventKey *ev, App *a)
+{
+	if (ev->keyval == GDK_KEY_Delete) {
+		app_end(a, (ev->state & GDK_SHIFT_MASK) ? SIGKILL : SIGTERM);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static GtkTreeViewColumn *
+text_column(GtkWidget *tree, const char *title, int col, gboolean right,
+	    GtkTreeCellDataFunc func, gpointer data, gboolean expand)
+{
+	GtkCellRenderer *cell = gtk_cell_renderer_text_new();
+	GtkTreeViewColumn *c = gtk_tree_view_column_new();
+
+	if (right)
+		g_object_set(cell, "xalign", 1.0, NULL);
+	else
+		g_object_set(cell, "ellipsize", PANGO_ELLIPSIZE_END, NULL);
+	gtk_tree_view_column_set_title(c, title);
+	gtk_tree_view_column_pack_start(c, cell, TRUE);
+	if (func)
+		gtk_tree_view_column_set_cell_data_func(c, cell, func, data, NULL);
+	else
+		gtk_tree_view_column_add_attribute(c, cell, "text", col);
+	gtk_tree_view_column_set_sort_column_id(c, col);
+	gtk_tree_view_column_set_resizable(c, TRUE);
+	gtk_tree_view_column_set_expand(c, expand);
+	if (right) {
+		gtk_tree_view_column_set_alignment(c, 1.0);
+		gtk_tree_view_column_set_min_width(c, 90);
+	} else if (!expand) {
+		gtk_tree_view_column_set_min_width(c, 110);
+	}
+	gtk_tree_view_append_column(GTK_TREE_VIEW(tree), c);
+	return c;
+}
+
+static GtkWidget *
+scrolled(GtkWidget *child)
+{
+	GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+				       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+	gtk_container_add(GTK_CONTAINER(scroll), child);
+	gtk_widget_set_vexpand(scroll, TRUE);
+	return scroll;
+}
+
+static GtkWidget *
+status_label(void)
+{
+	GtkWidget *l = gtk_label_new("");
+
+	gtk_label_set_xalign(GTK_LABEL(l), 0);
+	gtk_style_context_add_class(gtk_widget_get_style_context(l),
+				    "tm-status");
+	return l;
+}
+
+static GtkWidget *
+build_apps(App *a)
+{
+	GtkWidget *box, *bar, *run, *item, *hint;
+	GtkCellRenderer *icon, *text;
+	GtkTreeViewColumn *c;
+	GtkTreeSelection *sel;
+
+	box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+
+	bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+	g_object_set(bar, "margin", 8, NULL);
+	hint = styled_label("The apps with windows on the desktop, with "
+			    "all of their processes", "tm-sub", 0);
+	gtk_box_pack_start(GTK_BOX(bar), hint, FALSE, FALSE, 0);
+	a->app_end_btn = gtk_button_new_with_label("End task");
+	gtk_style_context_add_class(gtk_widget_get_style_context(a->app_end_btn),
+				    "destructive-action");
+	gtk_widget_set_sensitive(a->app_end_btn, FALSE);
+	g_signal_connect(a->app_end_btn, "clicked",
+			 G_CALLBACK(on_app_end_clicked), a);
+	gtk_box_pack_end(GTK_BOX(bar), a->app_end_btn, FALSE, FALSE, 0);
+	run = gtk_button_new_with_label("Run new task");
+	g_signal_connect(run, "clicked", G_CALLBACK(on_run_task), a);
+	gtk_box_pack_end(GTK_BOX(bar), run, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(box), bar, FALSE, FALSE, 0);
+
+	a->app_store = gtk_tree_store_new(N_ACOLS, G_TYPE_ICON, G_TYPE_STRING,
+					  G_TYPE_INT, G_TYPE_DOUBLE,
+					  G_TYPE_UINT64, G_TYPE_UINT);
+	a->app_sort = gtk_tree_model_sort_new_with_model(
+		GTK_TREE_MODEL(a->app_store));
+	gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(a->app_sort),
+					     AC_NAME, GTK_SORT_ASCENDING);
+	a->app_tree = gtk_tree_view_new_with_model(a->app_sort);
+
+	/* Name: icon and text */
+	c = gtk_tree_view_column_new();
+	gtk_tree_view_column_set_title(c, "Name");
+	icon = gtk_cell_renderer_pixbuf_new();
+	g_object_set(icon, "stock-size", GTK_ICON_SIZE_LARGE_TOOLBAR, NULL);
+	gtk_tree_view_column_pack_start(c, icon, FALSE);
+	gtk_tree_view_column_add_attribute(c, icon, "gicon", AC_ICON);
+	text = gtk_cell_renderer_text_new();
+	g_object_set(text, "ellipsize", PANGO_ELLIPSIZE_END, NULL);
+	gtk_tree_view_column_pack_start(c, text, TRUE);
+	gtk_tree_view_column_add_attribute(c, text, "text", AC_NAME);
+	gtk_tree_view_column_set_sort_column_id(c, AC_NAME);
+	gtk_tree_view_column_set_resizable(c, TRUE);
+	gtk_tree_view_column_set_expand(c, TRUE);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(a->app_tree), c);
+
+	text_column(a->app_tree, "PID", AC_PID, TRUE, app_pid_cell, a, FALSE);
+	text_column(a->app_tree, "CPU", AC_CPU, TRUE, app_cpu_cell, a, FALSE);
+	text_column(a->app_tree, "Memory", AC_MEM, TRUE, app_mem_cell, a,
+		    FALSE);
+
+	sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(a->app_tree));
+	g_signal_connect(sel, "changed", G_CALLBACK(on_app_selection_changed), a);
+	g_signal_connect(a->app_tree, "button-press-event",
+			 G_CALLBACK(on_app_tree_button), a);
+	g_signal_connect(a->app_tree, "key-press-event",
+			 G_CALLBACK(on_app_tree_key), a);
+
+	a->app_menu = gtk_menu_new();
+	item = gtk_menu_item_new_with_label("End task");
+	g_signal_connect(item, "activate", G_CALLBACK(on_app_end_clicked), a);
+	gtk_menu_shell_append(GTK_MENU_SHELL(a->app_menu), item);
+	item = gtk_menu_item_new_with_label("End task now (force)");
+	g_signal_connect(item, "activate", G_CALLBACK(on_app_kill_activate), a);
+	gtk_menu_shell_append(GTK_MENU_SHELL(a->app_menu), item);
+	gtk_menu_shell_append(GTK_MENU_SHELL(a->app_menu),
+			      gtk_separator_menu_item_new());
+	item = gtk_menu_item_new_with_label("Go to details");
+	g_signal_connect(item, "activate",
+			 G_CALLBACK(on_app_details_activate), a);
+	gtk_menu_shell_append(GTK_MENU_SHELL(a->app_menu), item);
+	gtk_widget_show_all(a->app_menu);
+	gtk_menu_attach_to_widget(GTK_MENU(a->app_menu), a->app_tree, NULL);
+
+	gtk_box_pack_start(GTK_BOX(box), scrolled(a->app_tree), TRUE, TRUE, 0);
+	a->app_status = status_label();
+	gtk_box_pack_start(GTK_BOX(box), a->app_status, FALSE, FALSE, 0);
+	return box;
+}
+
+/*
+ * Services tab
+ */
+
+/* Friendlier descriptions of the services hexaOS has */
+static const struct {
+	const char *name, *desc;
+} known_services[] = {
+	{ "psplash",	"Boot splash screen" },
+	{ "keymap",	"Keyboard layout" },
+	{ "seedrng",	"Random number generator seed" },
+	{ "syslogd",	"System log" },
+	{ "klogd",	"Kernel log" },
+	{ "growfs",	"Grows the system partition to fill the disk" },
+	{ "sysctl",	"Kernel settings" },
+	{ "udevd",	"Device manager (udev)" },
+	{ "modules",	"Loads kernel modules" },
+	{ "speakers",	"Turns on the laptop speakers (MAX98390)" },
+	{ "cgroupfs2",	"Control groups (used by containers)" },
+	{ "dbus-daemon", "Message bus (D-Bus)" },
+	{ "dbus",	"Message bus (D-Bus)" },
+	{ "iptables",	"Firewall rules" },
+	{ "iwd",	"Wi-Fi (iwd)" },
+	{ "network",	"Network interfaces" },
+	{ "wired",	"Wired network (DHCP)" },
+	{ "chronyd",	"Clock synchronization (chrony)" },
+	{ "crond",	"Scheduled tasks (cron)" },
+	{ "seatd",	"Seat manager: gives the desktop the screen and input" },
+	{ "cupsd",	"Printing (CUPS)" },
+	{ "dockerd",	"Docker containers" },
+	{ "fuse3",	"FUSE file systems" },
+};
+
+/* Stopping these ends the desktop session or breaks the system */
+static gboolean
+service_is_critical(const char *name)
+{
+	return strcmp(name, "seatd") == 0 || strcmp(name, "dbus-daemon") == 0 ||
+	       strcmp(name, "dbus") == 0 || strcmp(name, "udevd") == 0;
+}
+
+static char *
+unquote(const char *v)
+{
+	char *s = g_strstrip(g_strdup(v));
+	gsize n = strlen(s);
+
+	if (n >= 2 && (s[0] == '"' || s[0] == '\'') && s[n - 1] == s[0]) {
+		memmove(s, s + 1, n - 2);
+		s[n - 2] = 0;
+	}
+	return s;
+}
+
+/* Replaces $DAEMON and ${DAEMON} */
+static char *
+expand_daemon(const char *v, const char *daemon)
+{
+	char **parts, *a, *b;
+
+	if (!daemon)
+		return g_strdup(v);
+	parts = g_strsplit(v, "${DAEMON}", -1);
+	a = g_strjoinv(daemon, parts);
+	g_strfreev(parts);
+	parts = g_strsplit(a, "$DAEMON", -1);
+	b = g_strjoinv(daemon, parts);
+	g_strfreev(parts);
+	g_free(a);
+	return b;
+}
+
+/* What an init script runs: DAEMON=, PIDFILE= and a description (from
+ * the LSB header, else the first comment line) */
+static void
+parse_init_script(const char *path, char **daemon, char **pidfile,
+		  char **desc)
+{
+	char *data = read_file(path), **lines, **l, *raw_pidfile = NULL;
+	int n = 0;
+
+	*daemon = *pidfile = *desc = NULL;
+	if (!data)
+		return;
+	lines = g_strsplit(data, "\n", -1);
+	g_free(data);
+	for (l = lines; *l; l++, n++) {
+		const char *line = *l, *c;
+
+		if (!*daemon && g_str_has_prefix(line, "DAEMON="))
+			*daemon = unquote(line + 7);
+		else if (!raw_pidfile && g_str_has_prefix(line, "PIDFILE="))
+			raw_pidfile = unquote(line + 8);
+		else if ((c = strstr(line, "Short-Description:")))
+			g_free(*desc), *desc = g_strstrip(g_strdup(c + 18));
+		else if (!*desc && n > 0 && n < 6 && g_str_has_prefix(line, "# ") &&
+			 !strstr(line, "shellcheck") && !strstr(line, "###")) {
+			/* the first sentence */
+			const char *dot = strstr(line + 2, ". ");
+
+			*desc = dot ? g_strndup(line + 2, dot - line - 2)
+				    : g_strdup(line + 2);
+			g_strstrip(*desc);
+			if (g_str_has_suffix(*desc, "."))
+				(*desc)[strlen(*desc) - 1] = 0;
+		}
+	}
+	g_strfreev(lines);
+	if (*daemon && !**daemon)
+		g_free(*daemon), *daemon = NULL;
+	if (raw_pidfile) {
+		*pidfile = expand_daemon(raw_pidfile, *daemon);
+		g_free(raw_pidfile);
+	}
+}
+
+static int
+pid_from_file(const char *path)
+{
+	char *s = read_file(path), proc[32];
+	int pid;
+
+	if (!s)
+		return 0;
+	pid = atoi(s);
+	g_free(s);
+	snprintf(proc, sizeof proc, "/proc/%d", pid);
+	return pid > 0 && access(proc, F_OK) == 0 ? pid : 0;
+}
+
+typedef struct {
+	char *script;
+	gboolean autostart;
+} SvcScan;
+
+static void
+svc_scan_free(gpointer data)
+{
+	SvcScan *sc = data;
+
+	g_free(sc->script);
+	g_free(sc);
+}
+
+static void
+svc_row_free(gpointer data)
+{
+	SvcRow *r = data;
+
+	g_free(r->busy);
+	g_free(r);
+}
+
+static void update_svc_buttons(App *a);
+
+/* Lists /etc/init.d: SNNname runs at startup, a plain name only on demand */
+static void
+refresh_services(App *a)
+{
+	GHashTable *found = g_hash_table_new_full(g_str_hash, g_str_equal,
+						  g_free, svc_scan_free);
+	GHashTableIter it;
+	gpointer key, value;
+	struct dirent *de;
+	int running = 0;
+	char *text;
+	DIR *d;
+
+	d = opendir(INIT_DIR);
+	while (d && (de = readdir(d))) {
+		const char *n = de->d_name, *name;
+		gboolean at_boot;
+		struct stat sb;
+		SvcScan *sc;
+		char *path;
+
+		if (n[0] == '.' || strcmp(n, "rcS") == 0 || strcmp(n, "rcK") == 0)
+			continue;
+		if (n[0] == 'K' && isdigit((unsigned char) n[1]) &&
+		    isdigit((unsigned char) n[2]))
+			continue;	/* kill scripts */
+		path = g_build_filename(INIT_DIR, n, NULL);
+		if (stat(path, &sb) < 0 || !S_ISREG(sb.st_mode) ||
+		    access(path, X_OK) != 0) {
+			g_free(path);
+			continue;
+		}
+		at_boot = n[0] == 'S' && isdigit((unsigned char) n[1]) &&
+			  isdigit((unsigned char) n[2]) && n[3];
+		name = at_boot ? n + 3 : n;
+		sc = g_hash_table_lookup(found, name);
+		if (!sc) {
+			sc = g_new0(SvcScan, 1);
+			sc->script = path;
+			g_hash_table_insert(found, g_strdup(name), sc);
+		} else if (!at_boot) {	/* S60dockerd -> dockerd */
+			g_free(sc->script);
+			sc->script = path;
+		} else {
+			g_free(path);
+		}
+		if (at_boot)
+			sc->autostart = TRUE;
+	}
+	if (d)
+		closedir(d);
+
+	g_hash_table_iter_init(&it, a->svcs);
+	while (g_hash_table_iter_next(&it, &key, &value))
+		((SvcRow *) value)->seen = FALSE;
+
+	g_hash_table_iter_init(&it, found);
+	while (g_hash_table_iter_next(&it, &key, &value)) {
+		const char *name = key, *status;
+		SvcScan *sc = value;
+		SvcRow *r = g_hash_table_lookup(a->svcs, name);
+		char *daemon, *pidfile, *desc;
+		int pid = 0, state;
+		guint i;
+
+		parse_init_script(sc->script, &daemon, &pidfile, &desc);
+		for (i = 0; i < G_N_ELEMENTS(known_services); i++)
+			if (strcmp(known_services[i].name, name) == 0) {
+				g_free(desc);
+				desc = g_strdup(known_services[i].desc);
+			}
+
+		if (pidfile)
+			pid = pid_from_file(pidfile);
+		if (!pid && daemon)
+			pid = GPOINTER_TO_INT(g_hash_table_lookup(a->comms,
+								  daemon));
+		if (pid)
+			state = SVC_RUNNING;
+		else if (pidfile || daemon)
+			state = SVC_STOPPED;
+		else
+			state = SVC_ONESHOT;	/* does its job at startup */
+		if (state == SVC_RUNNING)
+			running++;
+
+		if (!r) {
+			r = g_new0(SvcRow, 1);
+			gtk_list_store_append(a->svc_store, &r->iter);
+			g_hash_table_insert(a->svcs, g_strdup(name), r);
+		}
+		r->seen = TRUE;
+		status = r->busy ? r->busy :
+			 state == SVC_RUNNING ? "Running" :
+			 state == SVC_STOPPED ? "Stopped" : "Startup task";
+		gtk_list_store_set(a->svc_store, &r->iter,
+				   SC_NAME, name,
+				   SC_DESC, desc ? desc : "",
+				   SC_STATUS, status,
+				   SC_PID, pid,
+				   SC_STARTUP, sc->autostart ? "Automatic" : "Manual",
+				   SC_STATE, state,
+				   -1);
+		g_free(daemon);
+		g_free(pidfile);
+		g_free(desc);
+	}
+
+	g_hash_table_iter_init(&it, a->svcs);
+	while (g_hash_table_iter_next(&it, &key, &value)) {
+		SvcRow *r = value;
+
+		if (!r->seen && !r->busy) {
+			gtk_list_store_remove(a->svc_store, &r->iter);
+			g_hash_table_iter_remove(&it);
+		}
+	}
+
+	text = g_strdup_printf("Services: %u    Running: %d",
+			       g_hash_table_size(found), running);
+	gtk_label_set_text(GTK_LABEL(a->svc_status), text);
+	g_free(text);
+	g_hash_table_destroy(found);
+	update_svc_buttons(a);
+}
+
+/* The selected service: its name (to free), state and row */
+static char *
+svc_selected(App *a, int *state, SvcRow **row)
+{
+	GtkTreeSelection *sel =
+		gtk_tree_view_get_selection(GTK_TREE_VIEW(a->svc_tree));
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	char *name = NULL;
+
+	*state = SVC_STOPPED;
+	if (row)
+		*row = NULL;
+	if (!gtk_tree_selection_get_selected(sel, &model, &iter))
+		return NULL;
+	gtk_tree_model_get(model, &iter, SC_NAME, &name, SC_STATE, state, -1);
+	if (row && name)
+		*row = g_hash_table_lookup(a->svcs, name);
+	return name;
+}
+
+static void
+update_svc_buttons(App *a)
+{
+	SvcRow *row;
+	int state;
+	char *name = svc_selected(a, &state, &row);
+	gboolean ok = name && row && !row->busy;
+
+	gtk_widget_set_sensitive(a->svc_start, ok && state != SVC_RUNNING);
+	gtk_widget_set_sensitive(a->svc_stop, ok && state != SVC_STOPPED);
+	gtk_widget_set_sensitive(a->svc_restart, ok);
+	g_free(name);
+}
+
+static char *
+ask_password(App *a, const char *text)
+{
+	GtkWidget *d, *box, *label, *entry;
+	char *pw = NULL;
+
+	d = gtk_dialog_new_with_buttons("Administrator permission",
+		GTK_WINDOW(a->window),
+		GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+		"_Cancel", GTK_RESPONSE_CANCEL, "_OK", GTK_RESPONSE_OK, NULL);
+	gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_OK);
+	box = gtk_dialog_get_content_area(GTK_DIALOG(d));
+	gtk_container_set_border_width(GTK_CONTAINER(box), 12);
+	gtk_box_set_spacing(GTK_BOX(box), 8);
+	label = gtk_label_new(text);
+	gtk_label_set_xalign(GTK_LABEL(label), 0);
+	gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
+	gtk_label_set_max_width_chars(GTK_LABEL(label), 50);
+	entry = gtk_entry_new();
+	gtk_entry_set_visibility(GTK_ENTRY(entry), FALSE);
+	gtk_entry_set_input_purpose(GTK_ENTRY(entry), GTK_INPUT_PURPOSE_PASSWORD);
+	gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+	gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(box), entry, FALSE, FALSE, 0);
+	gtk_widget_show_all(d);
+	if (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_OK)
+		pw = g_strdup(gtk_entry_get_text(GTK_ENTRY(entry)));
+	gtk_widget_destroy(d);
+	return pw;
+}
+
+/* Checks the password with sudo (sudo -v) */
+static gboolean
+password_ok(const char *pw)
+{
+	const char *argv[] = { "sudo", "-k", "-S", "-p", "", "-v", NULL };
+	GSubprocess *p;
+	char *line = g_strdup_printf("%s\n", pw);
+	gboolean ok;
+
+	p = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDIN_PIPE |
+			      G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+			      G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
+	ok = p && g_subprocess_communicate_utf8(p, line, NULL, NULL, NULL, NULL) &&
+	     g_subprocess_get_successful(p);
+	if (p)
+		g_object_unref(p);
+	memset(line, 0, strlen(line));
+	g_free(line);
+	return ok;
+}
+
+/* FALSE if the user cancelled */
+static gboolean
+get_admin(App *a)
+{
+	const char *argv[] = { "sudo", "-n", "true", NULL };
+	const char *text = "Starting and stopping services affects the whole "
+			   "computer. Type your password to allow it.";
+	GSubprocess *p;
+
+	if (getuid() == 0 || a->sudo_nopass || a->admin_pw)
+		return TRUE;
+	/* sudo may need no password (NOPASSWD, e.g. after hexa-dev) */
+	p = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+			      G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
+	if (p && g_subprocess_wait(p, NULL, NULL) &&
+	    g_subprocess_get_successful(p))
+		a->sudo_nopass = TRUE;
+	if (p)
+		g_object_unref(p);
+	if (a->sudo_nopass)
+		return TRUE;
+
+	for (;;) {
+		char *pw = ask_password(a, text);
+
+		if (!pw)
+			return FALSE;
+		if (password_ok(pw)) {
+			a->admin_pw = pw;
+			return TRUE;
+		}
+		memset(pw, 0, strlen(pw));
+		g_free(pw);
+		text = "Wrong password, or this account may not change the "
+		       "system. Try again.";
+	}
+}
+
+typedef struct {
+	App *a;
+	char *name, *action;
+} SvcJob;
+
+static void
+svc_done(GObject *src, GAsyncResult *res, gpointer data)
+{
+	SvcJob *j = data;
+	App *a = j->a;
+	SvcRow *r = g_hash_table_lookup(a->svcs, j->name);
+	char *out = NULL;
+	GError *err = NULL;
+	gboolean ok;
+
+	ok = g_subprocess_communicate_utf8_finish(G_SUBPROCESS(src), res, &out,
+						  NULL, &err) &&
+	     g_subprocess_get_successful(G_SUBPROCESS(src));
+	if (r) {
+		g_free(r->busy);
+		r->busy = NULL;
+	}
+	if (!ok) {
+		char *title = g_strdup_printf("Could not %s the service \"%s\".",
+					      j->action, j->name);
+
+		if (out && (strstr(out, "incorrect password") ||
+			    strstr(out, "password is required"))) {
+			g_free(a->admin_pw);
+			a->admin_pw = NULL;
+			a->sudo_nopass = FALSE;
+		}
+		show_error(a, title, err ? err->message :
+			   out && *g_strstrip(out) ? out : NULL);
+		g_free(title);
+	}
+	refresh_services(a);
+	g_clear_error(&err);
+	g_free(out);
+	g_object_unref(src);
+	g_free(j->name);
+	g_free(j->action);
+	g_free(j);
+}
+
+static void
+svc_run(App *a, const char *action)
+{
+	GPtrArray *argv;
+	GSubprocess *p;
+	GError *err = NULL;
+	SvcRow *row;
+	SvcJob *j;
+	char *name, *input = NULL;
+	int state;
+
+	name = svc_selected(a, &state, &row);
+	if (!name || !row || row->busy) {
+		g_free(name);
+		return;
+	}
+	if (strcmp(action, "start") != 0 && service_is_critical(name)) {
+		GtkWidget *d = gtk_message_dialog_new(GTK_WINDOW(a->window),
+			GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+			GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE,
+			"%s \"%s\"?", strcmp(action, "stop") == 0 ?
+			"Stop" : "Restart", name);
+		int resp;
+
+		gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(d),
+			"The desktop depends on this service: the session may "
+			"close, and unsaved work in open apps would be lost.");
+		gtk_dialog_add_buttons(GTK_DIALOG(d), "_Cancel",
+				       GTK_RESPONSE_CANCEL, "_Continue",
+				       GTK_RESPONSE_OK, NULL);
+		resp = gtk_dialog_run(GTK_DIALOG(d));
+		gtk_widget_destroy(d);
+		if (resp != GTK_RESPONSE_OK) {
+			g_free(name);
+			return;
+		}
+	}
+	if (!get_admin(a)) {
+		g_free(name);
+		return;
+	}
+
+	argv = g_ptr_array_new();
+	if (getuid() != 0) {
+		g_ptr_array_add(argv, "sudo");
+		if (a->sudo_nopass) {
+			g_ptr_array_add(argv, "-n");
+		} else {
+			g_ptr_array_add(argv, "-k");
+			g_ptr_array_add(argv, "-S");
+			g_ptr_array_add(argv, "-p");
+			g_ptr_array_add(argv, "");
+			input = g_strdup_printf("%s\n", a->admin_pw);
+		}
+	}
+	g_ptr_array_add(argv, HELPER);
+	g_ptr_array_add(argv, "service");
+	g_ptr_array_add(argv, name);
+	g_ptr_array_add(argv, (gpointer) action);
+	g_ptr_array_add(argv, NULL);
+	p = g_subprocess_newv((const char *const *) argv->pdata,
+			      G_SUBPROCESS_FLAGS_STDIN_PIPE |
+			      G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+			      G_SUBPROCESS_FLAGS_STDERR_MERGE, &err);
+	g_ptr_array_free(argv, TRUE);
+	if (!p) {
+		show_error(a, "Could not run the service helper.", err->message);
+		g_error_free(err);
+		g_free(input);
+		g_free(name);
+		return;
+	}
+
+	row->busy = g_strdup(strcmp(action, "start") == 0 ? "Starting…" :
+			     strcmp(action, "stop") == 0 ? "Stopping…" :
+			     "Restarting…");
+	gtk_list_store_set(a->svc_store, &row->iter, SC_STATUS, row->busy, -1);
+	update_svc_buttons(a);
+
+	j = g_new0(SvcJob, 1);
+	j->a = a;
+	j->name = name;
+	j->action = g_strdup(action);
+	g_subprocess_communicate_utf8_async(p, input, NULL, svc_done, j);
+	if (input) {
+		memset(input, 0, strlen(input));
+		g_free(input);
+	}
+}
+
+static void on_svc_start(GtkWidget *w, App *a) { svc_run(a, "start"); }
+static void on_svc_stop(GtkWidget *w, App *a) { svc_run(a, "stop"); }
+static void on_svc_restart(GtkWidget *w, App *a) { svc_run(a, "restart"); }
+
+static void
+on_svc_selection_changed(GtkTreeSelection *sel, App *a)
+{
+	update_svc_buttons(a);
+}
+
+static gboolean
+on_svc_tree_button(GtkWidget *w, GdkEventButton *ev, App *a)
+{
+	GtkTreePath *path;
+
+	if (ev->type != GDK_BUTTON_PRESS || ev->button != GDK_BUTTON_SECONDARY)
+		return FALSE;
+	if (!gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(a->svc_tree), ev->x,
+					   ev->y, &path, NULL, NULL, NULL))
+		return FALSE;
+	gtk_tree_selection_select_path(
+		gtk_tree_view_get_selection(GTK_TREE_VIEW(a->svc_tree)), path);
+	gtk_tree_path_free(path);
+	gtk_menu_popup_at_pointer(GTK_MENU(a->svc_menu), (GdkEvent *) ev);
+	return TRUE;
+}
+
+static void
+svc_status_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell,
+		GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	GdkRGBA green = { 0.35, 0.85, 0.50, 1 };
+	char *status = NULL;
+	int state = 0;
+
+	gtk_tree_model_get(model, iter, SC_STATUS, &status, SC_STATE, &state, -1);
+	g_object_set(cell, "text", status ? status : "", NULL);
+	if (state == SVC_RUNNING)
+		g_object_set(cell, "foreground-rgba", &green, NULL);
+	else
+		g_object_set(cell, "foreground-set", FALSE, NULL);
+	g_free(status);
+}
+
+static void
+svc_pid_cell(GtkTreeViewColumn *col, GtkCellRenderer *cell,
+	     GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	char buf[16] = "";
+	int pid = 0;
+
+	gtk_tree_model_get(model, iter, SC_PID, &pid, -1);
+	if (pid > 0)
+		snprintf(buf, sizeof buf, "%d", pid);
+	g_object_set(cell, "text", buf, NULL);
+}
+
+/* The menu items follow the buttons' sensitivity */
+static GtkWidget *
+svc_menu_item(App *a, const char *label, GtkWidget *button, GCallback cb)
+{
+	GtkWidget *item = gtk_menu_item_new_with_label(label);
+
+	g_signal_connect(item, "activate", cb, a);
+	g_object_bind_property(button, "sensitive", item, "sensitive",
+			       G_BINDING_SYNC_CREATE);
+	return item;
+}
+
+static GtkWidget *
+build_services(App *a)
+{
+	GtkWidget *box, *bar, *hint;
+	GtkTreeSelection *sel;
+
+	box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+
+	bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+	g_object_set(bar, "margin", 8, NULL);
+	hint = styled_label("System services (/etc/init.d). Changing them "
+			    "asks for your password.", "tm-sub", 0);
+	gtk_label_set_ellipsize(GTK_LABEL(hint), PANGO_ELLIPSIZE_END);
+	gtk_box_pack_start(GTK_BOX(bar), hint, TRUE, TRUE, 0);
+	a->svc_restart = gtk_button_new_with_label("Restart");
+	g_signal_connect(a->svc_restart, "clicked", G_CALLBACK(on_svc_restart), a);
+	gtk_box_pack_end(GTK_BOX(bar), a->svc_restart, FALSE, FALSE, 0);
+	a->svc_stop = gtk_button_new_with_label("Stop");
+	g_signal_connect(a->svc_stop, "clicked", G_CALLBACK(on_svc_stop), a);
+	gtk_box_pack_end(GTK_BOX(bar), a->svc_stop, FALSE, FALSE, 0);
+	a->svc_start = gtk_button_new_with_label("Start");
+	g_signal_connect(a->svc_start, "clicked", G_CALLBACK(on_svc_start), a);
+	gtk_box_pack_end(GTK_BOX(bar), a->svc_start, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(box), bar, FALSE, FALSE, 0);
+
+	a->svc_store = gtk_list_store_new(N_SCOLS, G_TYPE_STRING, G_TYPE_STRING,
+					  G_TYPE_STRING, G_TYPE_INT,
+					  G_TYPE_STRING, G_TYPE_INT);
+	a->svc_sort = gtk_tree_model_sort_new_with_model(
+		GTK_TREE_MODEL(a->svc_store));
+	gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(a->svc_sort),
+					     SC_NAME, GTK_SORT_ASCENDING);
+	a->svc_tree = gtk_tree_view_new_with_model(a->svc_sort);
+	text_column(a->svc_tree, "Name", SC_NAME, FALSE, NULL, a, FALSE);
+	text_column(a->svc_tree, "Description", SC_DESC, FALSE, NULL, a, TRUE);
+	text_column(a->svc_tree, "Status", SC_STATUS, FALSE, svc_status_cell,
+		    a, FALSE);
+	text_column(a->svc_tree, "PID", SC_PID, TRUE, svc_pid_cell, a, FALSE);
+	text_column(a->svc_tree, "Startup", SC_STARTUP, FALSE, NULL, a, FALSE);
+
+	sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(a->svc_tree));
+	g_signal_connect(sel, "changed", G_CALLBACK(on_svc_selection_changed), a);
+	g_signal_connect(a->svc_tree, "button-press-event",
+			 G_CALLBACK(on_svc_tree_button), a);
+
+	a->svc_menu = gtk_menu_new();
+	gtk_menu_shell_append(GTK_MENU_SHELL(a->svc_menu),
+		svc_menu_item(a, "Start", a->svc_start, G_CALLBACK(on_svc_start)));
+	gtk_menu_shell_append(GTK_MENU_SHELL(a->svc_menu),
+		svc_menu_item(a, "Stop", a->svc_stop, G_CALLBACK(on_svc_stop)));
+	gtk_menu_shell_append(GTK_MENU_SHELL(a->svc_menu),
+		svc_menu_item(a, "Restart", a->svc_restart,
+			      G_CALLBACK(on_svc_restart)));
+	gtk_widget_show_all(a->svc_menu);
+	gtk_menu_attach_to_widget(GTK_MENU(a->svc_menu), a->svc_tree, NULL);
+
+	gtk_box_pack_start(GTK_BOX(box), scrolled(a->svc_tree), TRUE, TRUE, 0);
+	a->svc_status = status_label();
+	gtk_box_pack_start(GTK_BOX(box), a->svc_status, FALSE, FALSE, 0);
+	update_svc_buttons(a);
 	return box;
 }
 
@@ -1302,16 +2765,20 @@ activate(GtkApplication *gapp, App *a)
 
 	a->window = gtk_application_window_new(gapp);
 	gtk_window_set_title(GTK_WINDOW(a->window), "Task Manager");
-	gtk_window_set_default_size(GTK_WINDOW(a->window), 900, 620);
+	gtk_window_set_default_size(GTK_WINDOW(a->window), 960, 640);
 	g_signal_connect(a->window, "destroy", G_CALLBACK(on_window_destroy), a);
 
-	stack = gtk_stack_new();
+	stack = a->stack = gtk_stack_new();
 	gtk_stack_set_transition_type(GTK_STACK(stack),
 				      GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
+	gtk_stack_add_titled(GTK_STACK(stack), build_apps(a),
+			     "apps", "Apps");
 	gtk_stack_add_titled(GTK_STACK(stack), build_processes(a),
 			     "processes", "Processes");
 	gtk_stack_add_titled(GTK_STACK(stack), build_performance(a),
 			     "performance", "Performance");
+	gtk_stack_add_titled(GTK_STACK(stack), build_services(a),
+			     "services", "Services");
 	gtk_container_add(GTK_CONTAINER(a->window), stack);
 
 	header = gtk_header_bar_new();
@@ -1327,7 +2794,7 @@ activate(GtkApplication *gapp, App *a)
 	refresh(a);		/* first sample: rates start on the next one */
 	a->timer = g_timeout_add_seconds(1, refresh, a);
 	gtk_widget_show_all(a->window);
-	gtk_widget_grab_focus(a->tree);
+	gtk_widget_grab_focus(a->app_tree);
 }
 
 int
@@ -1345,7 +2812,17 @@ main(int argc, char **argv)
 	a->page_size = sysconf(_SC_PAGESIZE);
 	a->ncpu = (int) sysconf(_SC_NPROCESSORS_ONLN);
 	a->procs = g_hash_table_new_full(g_direct_hash, g_direct_equal,
-					 NULL, g_free);
+					 NULL, proc_free);
+	a->groups = g_hash_table_new_full(g_str_hash, g_str_equal,
+					  g_free, group_free);
+	a->comms = g_hash_table_new_full(g_str_hash, g_str_equal,
+					 g_free, NULL);
+	a->apps = g_hash_table_new_full(g_str_hash, g_str_equal,
+					g_free, app_row_free);
+	a->svcs = g_hash_table_new_full(g_str_hash, g_str_equal,
+					g_free, svc_row_free);
+	a->windows_path = g_build_filename(g_get_user_runtime_dir(),
+					   "hexa-windows", NULL);
 	a->users = g_hash_table_new_full(g_direct_hash, g_direct_equal,
 					 NULL, g_free);
 

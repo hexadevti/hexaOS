@@ -48,6 +48,16 @@ USER_CONF=$(eval echo "~$USER_NAME")/.config/hexaos
 } > "$RUNTIME_DIR/weston.ini"
 chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR/weston.ini"
 
+# Zoom of 125% or 150% (Settings > Display): Weston only scales a screen by
+# whole numbers, so the apps are enlarged instead (session.env, app-scale=1.25).
+# GTK enlarges the text, Qt everything, Steam its window.
+APP_ENV=
+APP_SCALE=$(sed -n 's/^app-scale=//p' "$USER_CONF/session.env" 2>/dev/null | head -n 1)
+case $APP_SCALE in
+    1.[0-9]|1.[0-9][0-9])
+        APP_ENV="GDK_DPI_SCALE=$APP_SCALE QT_SCALE_FACTOR=$APP_SCALE STEAM_FORCE_DESKTOPUI_SCALING=$APP_SCALE" ;;
+esac
+
 cat > "$RUNTIME_DIR/session.sh" <<SESSION
 #!/bin/sh
 # Sound: PipeWire + PulseAudio server + session manager
@@ -61,7 +71,7 @@ chmod 755 "$RUNTIME_DIR/session.sh"
 
 su "$USER_NAME" -c "cd ~ && \
     LANG=en_US.UTF-8 XDG_RUNTIME_DIR=$RUNTIME_DIR \
-    XDG_SESSION_TYPE=wayland MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=wayland \
+    XDG_SESSION_TYPE=wayland MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=wayland $APP_ENV \
     XDG_DATA_DIRS=\$HOME/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share:/usr/share \
     exec dbus-run-session -- $RUNTIME_DIR/session.sh"
 
