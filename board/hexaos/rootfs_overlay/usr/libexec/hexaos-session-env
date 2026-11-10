@@ -1,0 +1,7 @@
+#!/bin/sh
+# Started by Weston once the desktop is up ([autolaunch] in weston.ini), with
+# Weston's environment. The D-Bus session started before Weston, so it does
+# not know DISPLAY (Xwayland) or WAYLAND_DISPLAY yet: apps that D-Bus starts,
+# and X11 apps that check it (Steam), need them.
+exec dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY \
+    XDG_RUNTIME_DIR XDG_SESSION_TYPE 2>/dev/null
