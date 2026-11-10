@@ -1,0 +1,48 @@
+desktop-shell: a click on a subsurface activates its window
+
+Clicking a window activates it (click_to_activate_binding). When the
+click landed on a subsurface, the subsurface's view was activated, so
+it got the keyboard focus and its window lost it until the focus moved
+back a moment later.
+
+Chrome (Wayland) draws its address bar suggestions in a subsurface and
+closes them when its window loses the keyboard focus, so a click on a
+suggestion closed the list before the click reached it: the
+suggestions could not be clicked. Menus drawn as xdg_popups (the
+three-dots menu) were not affected, as clicks in a popup go to the
+popup grab instead of this binding.
+
+activate_binding() now activates the view of the window (the main
+surface) that holds the clicked subsurface.
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index b035d22..b9bbfd2 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -4881,6 +4881,7 @@ activate_binding(struct weston_seat *seat,
+ {
+ 	struct weston_view *main_view;
+ 	struct weston_surface *main_surface;
++	struct shell_surface *shsurf;
+ 
+ 	if (!focus_view)
+ 		return;
+@@ -4889,10 +4890,16 @@ activate_binding(struct weston_seat *seat,
+ 		focus_view = main_view;
+ 
+ 	main_surface = weston_surface_get_main_surface(focus_view->surface);
+-	if (!get_shell_surface(main_surface))
++	shsurf = get_shell_surface(main_surface);
++	if (!shsurf)
+ 		return;
+ 
+-	activate(shell, focus_view, seat, flags);
++	/* hexaOS: activate the window, not the subsurface that was clicked.
++	 * Passing the subsurface's view gave it the keyboard focus, so the
++	 * window lost focus for a moment on every click on a subsurface:
++	 * Chrome then closed its address bar suggestions (a subsurface)
++	 * before the click reached them. */
++	activate(shell, shsurf->view, seat, flags);
+ }
+ 
+ static void
