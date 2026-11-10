@@ -1,0 +1,14 @@
+config BR2_PACKAGE_HEXA_ALSA_UCM_CONF
+	bool "hexa-alsa-ucm-conf (ALSA sound card profiles)"
+	depends on BR2_PACKAGE_ALSA_LIB_UCM
+	help
+	  ALSA Use Case Manager profiles: they tell PipeWire which
+	  devices of a sound card are the speakers, the headphone jack,
+	  the headset microphone and the built-in (digital) microphones.
+	  Without them, Intel SOF laptops show no internal microphone.
+	  Installed into /usr/share/alsa/ucm2.
+
+	  https://github.com/alsa-project/alsa-ucm-conf
+
+comment "hexa-alsa-ucm-conf needs alsa-lib with UCM"
+	depends on !BR2_PACKAGE_ALSA_LIB_UCM

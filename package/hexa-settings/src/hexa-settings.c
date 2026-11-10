@@ -21,10 +21,12 @@
 #define _GNU_SOURCE
 #include <gtk/gtk.h>
 #include <glib/gstdio.h>
+#include <gio/gdesktopappinfo.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <grp.h>
+#include <math.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
@@ -33,6 +35,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1912,6 +1915,17 @@ static struct {
 	gboolean filling;
 } snd;
 
+/* Microphone test: a level meter fed by "parec" (raw 16-bit samples of the
+ * default input, through pipewire-pulse) */
+static struct {
+	GtkWidget *button, *level;
+	GPid pid;
+	guint watch, decay, stop_timer;
+	double peak;
+} mic;
+
+static void mic_test_stop(void);
+
 static const char *const snd_default[2] = { "@DEFAULT_AUDIO_SINK@", "@DEFAULT_AUDIO_SOURCE@" };
 
 static void
@@ -1995,6 +2009,11 @@ on_sound_device(GtkComboBox *c, gpointer data)
 		return;
 	out = run_out(ARGV("wpctl", "set-default", id));
 	g_free(out);
+	/* a running microphone test follows the new microphone */
+	if (GPOINTER_TO_INT(data) == 1 && mic.pid) {
+		mic_test_stop();
+		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mic.button), TRUE);
+	}
 	snd.filling = TRUE;
 	sound_read_volume(GPOINTER_TO_INT(data));
 	snd.filling = FALSE;
@@ -2037,6 +2056,117 @@ on_sound_mute(GtkToggleButton *b, gpointer data)
 	if (snd.filling)
 		return;
 	run_job(ARGV("wpctl", "set-mute", snd_default[i], m ? "1" : "0"), NULL, NULL, NULL);
+}
+
+static gboolean
+mic_test_read(GIOChannel *ch, GIOCondition cond, gpointer data)
+{
+	gint16 buf[2048];
+	gsize n = 0, i;
+	double peak = 0;
+
+	if ((cond & G_IO_IN) &&
+	    g_io_channel_read_chars(ch, (char *) buf, sizeof buf, &n, NULL) == G_IO_STATUS_NORMAL &&
+	    n > 0) {
+		for (i = 0; i < n / 2; i++) {
+			double s = fabs((double) buf[i] / 32768.0);
+
+			if (s > peak)
+				peak = s;
+		}
+		/* square root: quiet speech still moves the bar */
+		peak = sqrt(peak);
+		if (peak > mic.peak)
+			mic.peak = peak;
+		return G_SOURCE_CONTINUE;
+	}
+	/* parec ended (no sound service, device gone) */
+	mic.watch = 0;
+	mic_test_stop();
+	return G_SOURCE_REMOVE;
+}
+
+/* the bar falls back slowly, like a VU meter */
+static gboolean
+mic_test_decay(gpointer data)
+{
+	gtk_level_bar_set_value(GTK_LEVEL_BAR(mic.level), mic.peak);
+	mic.peak *= 0.80;
+	return G_SOURCE_CONTINUE;
+}
+
+static gboolean
+mic_test_timeout(gpointer data)
+{
+	mic.stop_timer = 0;
+	mic_test_stop();
+	return G_SOURCE_REMOVE;
+}
+
+static void
+mic_test_start(void)
+{
+	const char *argv[] = { "parec", "--raw", "--format=s16le", "--channels=1",
+			       "--rate=16000", "--latency-msec=40",
+			       "--client-name=hexaOS Settings", NULL };
+	GIOChannel *ch;
+	int out;
+
+	if (mic.pid)
+		return;
+	if (!g_spawn_async_with_pipes(NULL, (char **) argv, NULL,
+				      G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD |
+				      G_SPAWN_STDERR_TO_DEV_NULL,
+				      NULL, NULL, &mic.pid, NULL, &out, NULL, NULL)) {
+		mic.pid = 0;
+		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mic.button), FALSE);
+		return;
+	}
+	ch = g_io_channel_unix_new(out);
+	g_io_channel_set_encoding(ch, NULL, NULL);
+	g_io_channel_set_buffered(ch, FALSE);
+	g_io_channel_set_close_on_unref(ch, TRUE);
+	mic.watch = g_io_add_watch(ch, G_IO_IN | G_IO_HUP | G_IO_ERR, mic_test_read, NULL);
+	g_io_channel_unref(ch);
+	mic.peak = 0;
+	mic.decay = g_timeout_add(50, mic_test_decay, NULL);
+	/* the microphone stays open only while someone is looking at it */
+	mic.stop_timer = g_timeout_add_seconds(60, mic_test_timeout, NULL);
+	gtk_button_set_label(GTK_BUTTON(mic.button), "Stop");
+}
+
+static void
+mic_test_stop(void)
+{
+	if (mic.watch)
+		g_source_remove(mic.watch);
+	if (mic.decay)
+		g_source_remove(mic.decay);
+	if (mic.stop_timer)
+		g_source_remove(mic.stop_timer);
+	mic.watch = mic.decay = mic.stop_timer = 0;
+	if (mic.pid) {
+		kill(mic.pid, SIGTERM);
+		waitpid(mic.pid, NULL, 0);
+		g_spawn_close_pid(mic.pid);
+		mic.pid = 0;
+	}
+	if (mic.level)
+		gtk_level_bar_set_value(GTK_LEVEL_BAR(mic.level), 0);
+	if (mic.button) {
+		gtk_button_set_label(GTK_BUTTON(mic.button), "Test");
+		if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(mic.button)))
+			gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mic.button), FALSE);
+	}
+}
+
+static void
+on_mic_test(GtkToggleButton *b, gpointer data)
+{
+	if (gtk_toggle_button_get_active(b))
+		mic_test_start();
+	else if (mic.pid)
+		mic_test_stop();
 }
 
 static void
@@ -2086,6 +2216,21 @@ build_sound(void)
 		gtk_box_pack_start(GTK_BOX(box), snd.mute[i], FALSE, FALSE, 0);
 		gtk_box_pack_start(GTK_BOX(box), snd.scale[i], FALSE, FALSE, 0);
 		add_row(list, "Volume", NULL, box, NULL);
+		if (i == 1) {
+			box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+			mic.level = gtk_level_bar_new_for_interval(0, 1);
+			gtk_level_bar_set_mode(GTK_LEVEL_BAR(mic.level), GTK_LEVEL_BAR_MODE_CONTINUOUS);
+			gtk_widget_set_size_request(mic.level, 220, 10);
+			gtk_widget_set_valign(mic.level, GTK_ALIGN_CENTER);
+			mic.button = gtk_toggle_button_new_with_label("Test");
+			g_signal_connect(mic.button, "toggled", G_CALLBACK(on_mic_test), NULL);
+			gtk_box_pack_start(GTK_BOX(box), mic.level, FALSE, FALSE, 0);
+			gtk_box_pack_start(GTK_BOX(box), mic.button, FALSE, FALSE, 0);
+			add_row(list, "Test your microphone",
+				"Press Test and speak: the bar moves when the microphone hears you. "
+				"No movement? Pick another microphone above, or check Mute.",
+				box, NULL);
+		}
 	}
 	if (g_file_test("/usr/bin/alsamixer", G_FILE_TEST_EXISTS)) {
 		list = section("Advanced");
@@ -2144,6 +2289,7 @@ build_display(void)
 	const char *n;
 	GPtrArray *cards = g_ptr_array_new_with_free_func(g_free);
 	guint k;
+	int connected = 0;
 
 	list = section("Brightness");
 	d = g_dir_open("/sys/class/backlight", 0, NULL);
@@ -2191,7 +2337,6 @@ build_display(void)
 	 * last screen is not connected (patches/weston/0006-*) */
 	{
 		GPtrArray *items = g_ptr_array_new_with_free_func(g_free);
-		int connected = 0;
 
 		g_ptr_array_add(items, g_strdup(""));
 		g_ptr_array_add(items, g_strdup("Automatic (the first screen)"));
@@ -2217,8 +2362,10 @@ build_display(void)
 		if (connected > 1) {
 			list = section("Several screens");
 			add_row(list, "Main screen",
-				"Apps open on the screen they were last on. New apps, and apps "
-				"whose screen is not connected, open on this one.",
+				"The other screens are placed around it (see Position on each "
+				"screen). Apps open on the screen they "
+				"were last on. New apps, and apps whose screen is not connected, "
+				"open on this one.",
 				bound_combo("shell", "primary-output", "",
 					    (const char *const *) items->pdata), NULL);
 		}
@@ -2277,6 +2424,16 @@ build_display(void)
 					  "rotate-90", "Portrait",
 					  "rotate-180", "Landscape (upside down)",
 					  "rotate-270", "Portrait (upside down)")), NULL);
+		/* where this screen goes next to the main one (patches/weston/0012-*) */
+		if (connected > 1)
+			add_row(list, "Position",
+				"Where this screen is, seen from the main screen. The mouse "
+				"crosses over on that side. Not used for the main screen.",
+				bound_combo(group, "side", "right",
+					    ITEMS("right", "Right of the main screen",
+						  "left", "Left of the main screen",
+						  "above", "Above the main screen",
+						  "below", "Below the main screen")), NULL);
 		g_strfreev(ml);
 		g_free(modes);
 		g_free(p);
@@ -3500,6 +3657,100 @@ build_about(void)
 }
 
 /*
+ * Default apps
+ */
+
+/* What a web browser opens; ~/.config/mimeapps.list gets them all (GIO
+ * writes it), and xdg-open, Files and GTK/Electron apps follow it */
+static const char *const web_types[] = {
+	"x-scheme-handler/http", "x-scheme-handler/https", "text/html",
+	"application/xhtml+xml", NULL
+};
+
+static struct {
+	GtkWidget *browser, *sub;
+	gboolean filling;
+} defapps;
+
+static void
+defapps_refresh(void)
+{
+	GList *apps, *a;
+	GAppInfo *def;
+	const char *def_id;
+	int n = 0;
+
+	defapps.filling = TRUE;
+	gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(defapps.browser));
+	/* a fresh look at the app folders: browsers installed from the Store */
+	apps = g_app_info_get_all_for_type("x-scheme-handler/https");
+	def = g_app_info_get_default_for_type("x-scheme-handler/https", FALSE);
+	def_id = def ? g_app_info_get_id(def) : NULL;
+	for (a = apps; a; a = a->next) {
+		GAppInfo *app = a->data;
+		const char *id = g_app_info_get_id(app);
+
+		if (!id || (!g_app_info_should_show(app) && g_strcmp0(id, def_id) != 0))
+			continue;
+		gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(defapps.browser), id,
+					  g_app_info_get_display_name(app));
+		n++;
+	}
+	if (!def_id || !gtk_combo_box_set_active_id(GTK_COMBO_BOX(defapps.browser), def_id))
+		gtk_combo_box_set_active_id(GTK_COMBO_BOX(defapps.browser), "firefox.desktop");
+	set_sub(defapps.sub, n > 1 ? "Links you click in other apps open here." :
+		"Links you click in other apps open here. Other browsers (Chrome, "
+		"Brave, Edge...) show up here once installed from the Store.");
+	g_list_free_full(apps, g_object_unref);
+	if (def)
+		g_object_unref(def);
+	defapps.filling = FALSE;
+}
+
+static void
+on_default_browser(GtkComboBox *c, gpointer data)
+{
+	const char *id = gtk_combo_box_get_active_id(c);
+	GDesktopAppInfo *app;
+	GError *err = NULL;
+	int i;
+
+	if (defapps.filling || !id || !(app = g_desktop_app_info_new(id)))
+		return;
+	for (i = 0; web_types[i] && !err; i++)
+		g_app_info_set_as_default_for_type(G_APP_INFO(app), web_types[i], &err);
+	if (err) {
+		message(GTK_MESSAGE_ERROR, "Could not change the default browser", err->message);
+		g_error_free(err);
+	}
+	g_object_unref(app);
+}
+
+static void
+on_open_store(GtkButton *b, gpointer data)
+{
+	g_spawn_command_line_async("hexa-store", NULL);
+}
+
+static GtkWidget *
+build_defapps(void)
+{
+	GtkWidget *page = page_new("Default apps",
+		"The apps that open links and pages. Changes apply right away."), *list;
+
+	list = section(NULL);
+	defapps.browser = gtk_combo_box_text_new();
+	gtk_widget_set_size_request(defapps.browser, 260, -1);
+	g_signal_connect(defapps.browser, "changed", G_CALLBACK(on_default_browser), NULL);
+	add_row(list, "Web browser", NULL, defapps.browser, &defapps.sub);
+	if (g_file_test("/usr/bin/hexa-store", G_FILE_TEST_IS_EXECUTABLE))
+		add_row(list, "More browsers", "Chrome, Brave, Edge, Chromium and others are in the Store.",
+			button_new("Open Store", G_CALLBACK(on_open_store), NULL), NULL);
+	defapps_refresh();
+	return page;
+}
+
+/*
  * Window
  */
 
@@ -3514,6 +3765,7 @@ static const struct {
 	{ "display", "Display", "video-display-symbolic", build_display, NULL },
 	{ "personalization", "Personalization", "preferences-desktop-wallpaper-symbolic",
 	  build_personal, NULL },
+	{ "apps", "Default apps", "applications-internet-symbolic", build_defapps, defapps_refresh },
 	{ "keyboard", "Keyboard", "input-keyboard-symbolic", build_keyboard, NULL },
 	{ "mouse", "Mouse & touchpad", "input-mouse-symbolic", build_mouse, NULL },
 	{ "time", "Date & time", "preferences-system-time-symbolic", build_time, time_shown },
@@ -3554,6 +3806,8 @@ on_nav(GtkListBox *box, GtkListBoxRow *row, gpointer data)
 	if (!row)
 		return;
 	i = gtk_list_box_row_get_index(row);
+	if (strcmp(pages[i].id, "sound") != 0)
+		mic_test_stop();
 	gtk_stack_set_visible_child_name(GTK_STACK(stack), pages[i].id);
 	if (pages[i].shown)
 		pages[i].shown();
@@ -3719,6 +3973,7 @@ main(int argc, char **argv)
 	/* only the page name is passed on: GApplication would refuse other options */
 	status = g_application_run(G_APPLICATION(app),
 				   argc > 1 && argv[1][0] != '-' ? 2 : 1, argv);
+	mic_test_stop();	/* never leave the microphone open */
 	g_object_unref(app);
 	return status;
 }

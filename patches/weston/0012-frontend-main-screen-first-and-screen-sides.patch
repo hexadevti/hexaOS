@@ -1,0 +1,186 @@
+frontend: the main screen comes first; other screens left, right, above or below it
+
+Weston placed the screens in a row, left to right, in the order the
+graphics card lists its connectors, whatever the main screen was
+([shell] primary-output, Settings > Display). Now:
+
+- The main screen is enabled first and kept first in Weston's list of
+  screens: it is the default screen (used when a window has no screen
+  yet) and the first one apps are told about, so X11 apps and games
+  (XWayland, Wine, Steam) treat it as their primary monitor.
+- Each other screen is placed beside the main one, as chosen in
+  Settings > Display: "side=right" (the default), left, above or below in
+  its [output] section. Screens on the same side go one after another.
+- The layout is redone whenever a screen is plugged in or unplugged, and
+  shifted so that no coordinate is negative.
+
+diff --git a/frontend/main.c b/frontend/main.c
+index d135e77..9f60f82 100644
+--- a/frontend/main.c
++++ b/frontend/main.c
+@@ -2954,22 +2954,158 @@ drm_process_layoutput(struct wet_compositor *wet, struct wet_layoutput *lo)
+ 	return 0;
+ }
+ 
++/*
++ * hexaOS: screen layout. The main screen ([shell] primary-output, chosen in
++ * Settings > Display) is enabled first and kept first in the output list,
++ * so it is Weston's default screen and the first one apps (XWayland, Wine)
++ * are told about. The other screens are placed around it, as chosen with
++ * "side" in their [output] section: right (the default), left, above or
++ * below. The whole layout is then shifted so no coordinate is negative.
++ */
++static char *
++hexa_primary_output_name(struct wet_compositor *wet)
++{
++	struct weston_config_section *section;
++	char *name = NULL;
++
++	section = weston_config_get_section(wet->config, "shell", NULL, NULL);
++	weston_config_section_get_string(section, "primary-output", &name, NULL);
++	if (name && !*name) {
++		free(name);
++		name = NULL;
++	}
++	return name;
++}
++
++enum hexa_side { HEXA_SIDE_RIGHT, HEXA_SIDE_LEFT, HEXA_SIDE_ABOVE, HEXA_SIDE_BELOW };
++
++static enum hexa_side
++hexa_output_side(struct wet_compositor *wet, const char *name)
++{
++	struct weston_config_section *section;
++	enum hexa_side side = HEXA_SIDE_RIGHT;
++	char *s = NULL;
++
++	section = weston_config_get_section(wet->config, "output", "name", name);
++	weston_config_section_get_string(section, "side", &s, NULL);
++	if (s && strcmp(s, "left") == 0)
++		side = HEXA_SIDE_LEFT;
++	else if (s && strcmp(s, "above") == 0)
++		side = HEXA_SIDE_ABOVE;
++	else if (s && strcmp(s, "below") == 0)
++		side = HEXA_SIDE_BELOW;
++	free(s);
++	return side;
++}
++
++static void
++hexa_arrange_outputs(struct wet_compositor *wet)
++{
++	struct weston_compositor *c = wet->compositor;
++	struct weston_output *output, *main_output = NULL;
++	struct {
++		struct weston_output *output;
++		int32_t x, y;
++	} at[32];
++	int32_t right, left, top, bottom, min_x = 0, min_y = 0;
++	char *primary = hexa_primary_output_name(wet);
++	int n = 0, i;
++
++	wl_list_for_each(output, &c->output_list, link)
++		if (!output->destroying && primary &&
++		    strcmp(output->name, primary) == 0)
++			main_output = output;
++	free(primary);
++	if (!main_output) {
++		wl_list_for_each(output, &c->output_list, link) {
++			if (!output->destroying) {
++				main_output = output;
++				break;
++			}
++		}
++	}
++	if (!main_output)
++		return;
++
++	/* first in the list: the default screen */
++	wl_list_remove(&main_output->link);
++	wl_list_insert(&c->output_list, &main_output->link);
++
++	at[n].output = main_output;
++	at[n].x = 0;
++	at[n++].y = 0;
++	right = main_output->width;
++	left = 0;
++	top = 0;
++	bottom = main_output->height;
++	wl_list_for_each(output, &c->output_list, link) {
++		if (output == main_output || output->destroying ||
++		    n == (int) ARRAY_LENGTH(at))
++			continue;
++		at[n].output = output;
++		switch (hexa_output_side(wet, output->name)) {
++		case HEXA_SIDE_LEFT:
++			left -= output->width;
++			at[n].x = left;
++			at[n].y = 0;
++			break;
++		case HEXA_SIDE_ABOVE:
++			top -= output->height;
++			at[n].x = (main_output->width - output->width) / 2;
++			at[n].y = top;
++			break;
++		case HEXA_SIDE_BELOW:
++			at[n].x = (main_output->width - output->width) / 2;
++			at[n].y = bottom;
++			bottom += output->height;
++			break;
++		case HEXA_SIDE_RIGHT:
++		default:
++			at[n].x = right;
++			at[n].y = 0;
++			right += output->width;
++			break;
++		}
++		n++;
++	}
++
++	for (i = 0; i < n; i++) {
++		min_x = MIN(min_x, at[i].x);
++		min_y = MIN(min_y, at[i].y);
++	}
++	for (i = 0; i < n; i++) {
++		struct weston_coord_global pos;
++
++		pos.c = weston_coord(at[i].x - min_x, at[i].y - min_y);
++		weston_output_set_position(at[i].output, pos);
++	}
++}
++
+ static int
+ drm_process_layoutputs(struct wet_compositor *wet)
+ {
+ 	struct wet_layoutput *lo;
+ 	int failed_layoutputs = 0;
++	char *primary = hexa_primary_output_name(wet);
++	int pass;
+ 
+-	wl_list_for_each(lo, &wet->layoutput_list, compositor_link) {
+-		if (lo->add.n == 0)
+-			continue;
++	/* hexaOS: the main screen first (see hexa_arrange_outputs) */
++	for (pass = 0; pass < 2; pass++) {
++		wl_list_for_each(lo, &wet->layoutput_list, compositor_link) {
++			if (lo->add.n == 0)
++				continue;
++			if (pass == 0 && (!primary || strcmp(lo->name, primary) != 0))
++				continue;
+ 
+-		if (drm_process_layoutput(wet, lo) < 0) {
+-			lo->add = (struct wet_head_array){};
+-			failed_layoutputs += 1;
+-			continue;
++			if (drm_process_layoutput(wet, lo) < 0) {
++				lo->add = (struct wet_head_array){};
++				failed_layoutputs += 1;
++				continue;
++			}
+ 		}
+ 	}
++	free(primary);
++	hexa_arrange_outputs(wet);
+ 
+ 	if (wet->require_outputs == REQUIRE_OUTPUTS_ALL_FOUND &&
+ 	    failed_layoutputs > 0)

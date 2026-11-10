@@ -91,6 +91,17 @@ CONFIG_SND_SOC_INTEL_SST_TOPLEVEL=y
 CONFIG_SND_SOC_INTEL_MACH=y
 CONFIG_SND_SOC_INTEL_SKL_HDA_DSP_GENERIC_MACH=m
 CONFIG_SND_SOC_DMIC=m
+# Microphones and headsets on other computers: USB microphones, webcams and
+# USB headsets (UAC), and the other common HDA codecs (headset jacks)
+CONFIG_SND_USB_AUDIO=m
+CONFIG_SND_HDA_CODEC_ANALOG=m
+CONFIG_SND_HDA_CODEC_SIGMATEL=m
+CONFIG_SND_HDA_CODEC_VIA=m
+CONFIG_SND_HDA_CODEC_CONEXANT=m
+CONFIG_SND_HDA_CODEC_SENARYTECH=m
+CONFIG_SND_HDA_CODEC_CIRRUS=m
+CONFIG_SND_HDA_CODEC_CA0132=m
+CONFIG_SND_HDA_CODEC_CMEDIA=m
 
 # Speakers: the MAX98390 amplifier driver is built by package/hexa-max98390.
 # /dev/i2c-N lets /etc/init.d/S12speakers find which amplifiers answer.

@@ -39,7 +39,7 @@ HEXA_FLATPAK_CONF_OPTS = \
 
 # Flathub (the app store Steam comes from) for system-wide installs: root's
 # "flatpak install flathub ..." finds it without a remote-add. Per-user
-# installs add it in hexa-steam. (File from https://dl.flathub.org/repo/flathub.flatpakrepo)
+# installs add it in the Store. (File from https://dl.flathub.org/repo/flathub.flatpakrepo)
 define HEXA_FLATPAK_INSTALL_FLATHUB
 	$(INSTALL) -D -m 0644 $(HEXA_FLATPAK_PKGDIR)/flathub.flatpakrepo \
 		$(TARGET_DIR)/etc/flatpak/remotes.d/flathub.flatpakrepo

@@ -1,0 +1,195 @@
+desktop-shell: windows too big for their screen are maximized on it
+
+A window bigger than the work area of its screen is asked to fit it
+(patches 0005 and 0009), but some apps ignore the size they are given, or
+cannot get that small (their minimum size is bigger than the screen, e.g.
+on a small or zoomed screen). Such a window stayed at the top left of the
+screen, partly off it and under the taskbar.
+
+- If a window asked to fit its screen is still too big a second later,
+  it is maximized on that screen, which makes it exactly as big as the
+  work area. Fixed-size windows (minimum size = maximum size) are left
+  alone. Weston logs each case ("hexaOS: window ... maximizing it").
+- A window restored from maximized or full screen (not by dragging it)
+  may come back at a size it remembered from a bigger screen: it is now
+  kept inside its screen, as a new window is.
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index b035d22..c4a0c78 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -176,6 +176,10 @@ struct shell_surface {
+ 	 * set, it is kept inside its screen when it changes size (apps that
+ 	 * open small and then grow to a remembered size) */
+ 	bool keep_on_screen;
++
++	/* hexaOS: armed when a window is asked to fit its screen; if it is
++	 * still too big when this fires, it is maximized on that screen */
++	struct wl_event_source *fit_timer;
+ };
+ 
+ struct shell_grab {
+@@ -382,6 +386,9 @@ desktop_shell_destroy_surface(struct shell_surface *shsurf)
+ 	wl_signal_emit(&shsurf->destroy_signal, shsurf);
+ 	weston_surface_unref(shsurf->wsurface_anim_fade);
+ 
++	if (shsurf->fit_timer)
++		wl_event_source_remove(shsurf->fit_timer);
++
+ 	free(shsurf->tb.title);
+ 	free(shsurf->tb.app_id);
+ 
+@@ -2687,6 +2694,11 @@ desktop_surface_removed(struct weston_desktop_surface *desktop_surface,
+ 	taskbar_remove(shsurf);
+ 	/* hexaOS: its app opens on this screen next time */
+ 	remember_window_screen(shsurf);
++	if (shsurf->fit_timer) {
++		wl_event_source_remove(shsurf->fit_timer);
++		shsurf->fit_timer = NULL;
++	}
++	shsurf->recenter_output = NULL;
+ 
+ 	wl_list_for_each(seat, &shsurf->shell->compositor->seat_list, link) {
+ 		struct shell_seat *shseat = get_shell_seat(seat);
+@@ -2787,6 +2799,107 @@ set_position_from_xwayland(struct shell_surface *shsurf)
+ #endif
+ }
+ 
++/* The screen OUTPUT if it is still connected, else NULL */
++static struct weston_output *
++live_output(struct weston_compositor *compositor, struct weston_output *output)
++{
++	struct weston_output *o;
++
++	if (!output)
++		return NULL;
++	wl_list_for_each(o, &compositor->output_list, link)
++		if (o == output && !o->destroying)
++			return o;
++	return NULL;
++}
++
++/* The window's visible size (without client-side shadows) */
++static struct weston_geometry
++window_geometry(struct shell_surface *shsurf)
++{
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_geometry geo;
++
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	if (geo.width <= 0 || geo.height <= 0) {
++		geo.x = 0;
++		geo.y = 0;
++		geo.width = surface->width;
++		geo.height = surface->height;
++	}
++	return geo;
++}
++
++#define HEXA_FIT_TIMEOUT_MS 1000
++
++/*
++ * hexaOS: a window was asked to fit its screen and has had a moment to do
++ * it. Apps that ignore the size they are given, or cannot get that small
++ * (their minimum size is bigger), would stay partly off the screen and under
++ * the taskbar: they are maximized on that screen instead, which makes them
++ * exactly as big as its work area. Fixed-size windows are left alone.
++ */
++static int
++fit_timer_done(void *data)
++{
++	struct shell_surface *shsurf = data;
++	struct weston_output *output;
++	struct weston_geometry geo;
++	struct weston_size min, max;
++	pixman_rectangle32_t area;
++
++	if (!shsurf->desktop_surface || !shsurf->recenter_output)
++		return 0;
++	output = live_output(shsurf->shell->compositor, shsurf->recenter_output);
++	shsurf->recenter_output = NULL;
++	if (!output || shsurf->state.fullscreen || shsurf->state.maximized)
++		return 0;
++
++	get_output_work_area(shsurf->shell, output, &area);
++	geo = window_geometry(shsurf);
++	if (geo.width <= (int32_t) area.width && geo.height <= (int32_t) area.height) {
++		shell_surface_center_on_output(shsurf, output);
++		return 0;
++	}
++
++	min = weston_desktop_surface_get_min_size(shsurf->desktop_surface);
++	max = weston_desktop_surface_get_max_size(shsurf->desktop_surface);
++	if (min.width > 0 && min.width == max.width &&
++	    min.height > 0 && min.height == max.height)
++		return 0;
++
++	weston_log("hexaOS: window \"%s\" (%dx%d) is bigger than its screen "
++		   "%s (%ux%u): maximizing it\n",
++		   weston_desktop_surface_get_title(shsurf->desktop_surface) ?: "",
++		   geo.width, geo.height, output->name, area.width, area.height);
++	shsurf->keep_on_screen = false;
++	set_maximized_on(shsurf, true, output);
++	return 0;
++}
++
++/*
++ * hexaOS: asks a window bigger than OUTPUT's work area to fit it (W x H).
++ * It is centered there once its new size arrives (recenter_if_it_fits), or
++ * maximized there if it is still too big a moment later (fit_timer_done).
++ */
++static void
++ask_window_to_fit(struct shell_surface *shsurf, struct weston_output *output,
++		  int32_t w, int32_t h)
++{
++	struct wl_event_loop *loop =
++		wl_display_get_event_loop(shsurf->shell->compositor->wl_display);
++
++	weston_desktop_surface_set_size(shsurf->desktop_surface, w, h);
++	shsurf->recenter_output = output;
++	if (!shsurf->fit_timer)
++		shsurf->fit_timer = wl_event_loop_add_timer(loop, fit_timer_done,
++							    shsurf);
++	if (shsurf->fit_timer)
++		wl_event_source_timer_update(shsurf->fit_timer,
++					     HEXA_FIT_TIMEOUT_MS);
++}
++
+ /*
+  * hexaOS: where a new window opens. On the screen its app was last on, else
+  * on the main screen (new_window_output), inside its work area (the taskbar
+@@ -2830,8 +2943,7 @@ place_new_window(struct desktop_shell *shell, struct shell_surface *shsurf)
+ 	if (w > (int32_t) area.width || h > (int32_t) area.height) {
+ 		w = MIN(w, (int32_t) area.width);
+ 		h = MIN(h, (int32_t) area.height);
+-		weston_desktop_surface_set_size(shsurf->desktop_surface, w, h);
+-		shsurf->recenter_output = target;
++		ask_window_to_fit(shsurf, target, w, h);
+ 		x = area.x;
+ 		y = area.y;
+ 	} else {
+@@ -2934,9 +3046,7 @@ keep_window_on_screen(struct shell_surface *shsurf)
+ 		return;
+ 
+ 	if (w > aw || h > ah) {
+-		weston_desktop_surface_set_size(shsurf->desktop_surface,
+-						MIN(w, aw), MIN(h, ah));
+-		shsurf->recenter_output = output;
++		ask_window_to_fit(shsurf, output, MIN(w, aw), MIN(h, ah));
+ 		x = ax;
+ 		y = ay;
+ 	} else {
+@@ -3089,6 +3199,12 @@ desktop_surface_committed_impl(struct weston_desktop_surface *desktop_surface,
+ 		unset_fullscreen(shsurf);
+ 	if (was_maximized)
+ 		unset_maximized(shsurf);
++	/* hexaOS: restored (not by dragging it): its normal size may be one
++	 * it remembered from a bigger screen; keep it inside this one */
++	if ((was_fullscreen || was_maximized) &&
++	    !shsurf->state.fullscreen && !shsurf->state.maximized &&
++	    !shsurf->unsnap.pending)
++		shsurf->keep_on_screen = true;
+ 
+ 	if ((shsurf->state.fullscreen || shsurf->state.maximized) &&
+ 	    !shsurf->saved_position_valid) {
