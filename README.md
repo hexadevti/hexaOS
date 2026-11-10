@@ -27,6 +27,7 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/bin/hexa-settings-tui       text-mode Settings (console fallback)
   usr/bin/hexa-setup              applies this machine's settings (Start menu)
   usr/bin/hexa-power              restart / shut down (Start menu)
+  usr/bin/hexa-vpn                WireGuard VPN, e.g. Proton VPN (import, up, down, status)
   usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login)
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
   etc/hexaos/setup.conf           values for hexa-setup, e.g. Wi-Fi password (not in git;
@@ -100,6 +101,7 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Programming                | VS Code icon on the taskbar, or `code folder/`          |
 | Full Ubuntu (apt)          | `hexa-dev` (Docker container sharing your home folder)  |
 | Apps from Flathub          | Store (Start menu > Apps): search, install, update, remove; adds them to the Start menu's Apps folder. Command line: `flatpak install --user flathub ID` |
+| VPN (WireGuard, e.g. Proton) | download a WireGuard config from your VPN account (Proton: account.protonvpn.com > Downloads), then `hexa-vpn import file.conf` once, `hexa-vpn up` / `hexa-vpn down` / `hexa-vpn status`. VPN apps that need NetworkManager (such as the Proton VPN app) cannot connect on hexaOS |
 | Windows program            | `wine program.exe`                                      |
 | Windows games (DirectX)    | `hexa-dxvk install` once, then `wine game.exe`          |
 | Claude Code (first time)   | `curl -fsSL https://claude.ai/install.sh \| bash`, then `claude` |

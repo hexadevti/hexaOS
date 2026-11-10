@@ -177,15 +177,27 @@ run_host(const char *const *args, JobDone done, gpointer data)
 	Job *job;
 
 	if (in_sandbox) {
-		g_ptr_array_add(argv, "flatpak-spawn");
-		g_ptr_array_add(argv, "--host");
+		/* The host side starts without the desktop's environment: hand
+		 * over what apps need to find the screen (as hexa-session sets it) */
+		const char *wl = g_getenv("WAYLAND_DISPLAY");
+
+		g_ptr_array_add(argv, g_strdup("flatpak-spawn"));
+		g_ptr_array_add(argv, g_strdup("--host"));
+		if (wl)
+			g_ptr_array_add(argv, g_strdup_printf("--env=WAYLAND_DISPLAY=%s", wl));
+		g_ptr_array_add(argv, g_strdup("--env=XDG_SESSION_TYPE=wayland"));
+		g_ptr_array_add(argv, g_strdup("--env=MOZ_ENABLE_WAYLAND=1"));
+		g_ptr_array_add(argv, g_strdup("--env=ELECTRON_OZONE_PLATFORM_HINT=wayland"));
+		if (g_getenv("LANG"))
+			g_ptr_array_add(argv, g_strdup_printf("--env=LANG=%s", g_getenv("LANG")));
 	}
 	for (; *args; args++)
-		g_ptr_array_add(argv, (gpointer) *args);
+		g_ptr_array_add(argv, g_strdup(*args));
 	g_ptr_array_add(argv, NULL);
 
 	p = g_subprocess_newv((const char *const *) argv->pdata,
 			      G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, &e);
+	g_ptr_array_set_free_func(argv, g_free);
 	g_ptr_array_free(argv, TRUE);
 	if (!p) {
 		done(FALSE, "", e->message, data);
@@ -677,7 +689,13 @@ ignore_done(gboolean ok, const char *out, const char *err, gpointer data)
 static void
 on_open(GtkButton *b, gpointer data)
 {
-	run_host(ARGV("flatpak", "run", BTN_ID(b)), ignore_done, NULL);
+	/* DISPLAY (Xwayland, for X11-only apps) is not visible in the sandbox:
+	 * take it from the host's X11 socket. The app's output goes nowhere, so
+	 * it keeps running when the Store closes. */
+	run_host(ARGV("sh", "-c", "x=$(ls /tmp/.X11-unix 2>/dev/null | sed -n 's/^X//p' | head -n 1); "
+		      "[ -n \"$x\" ] && export DISPLAY=:$x; "
+		      "exec flatpak run \"$1\" >/dev/null 2>&1 </dev/null",
+		      "sh", BTN_ID(b)), ignore_done, NULL);
 }
 
 static void

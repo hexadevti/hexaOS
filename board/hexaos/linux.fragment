@@ -142,6 +142,18 @@ CONFIG_IP6_NF_TARGET_MASQUERADE=y
 CONFIG_NF_TABLES=y
 CONFIG_NFT_COMPAT=y
 
+# VPN: WireGuard (hexa-vpn, wg-quick) and TUN (OpenVPN and other VPN apps).
+# wg-quick sends all traffic through the tunnel with policy routing (fwmark
+# rules) and marks its packets with CONNMARK in the raw/mangle tables.
+CONFIG_WIREGUARD=y
+CONFIG_TUN=y
+CONFIG_IP_ADVANCED_ROUTER=y
+CONFIG_IP_MULTIPLE_TABLES=y
+CONFIG_IPV6_MULTIPLE_TABLES=y
+CONFIG_NF_CONNTRACK_MARK=y
+CONFIG_NETFILTER_XT_CONNMARK=y
+CONFIG_IP6_NF_RAW=y
+
 # Game controllers (Xbox, PlayStation, Switch) and virtual input
 CONFIG_INPUT_JOYDEV=m
 CONFIG_INPUT_JOYSTICK=y
