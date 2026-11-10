@@ -1,13 +1,18 @@
 #!/bin/sh
-# Minimal xdg-open (hexaOS has no desktop environment): VS Code opens the
-# GitHub/Microsoft login page with it, and Firefox sends the vscode:// reply back.
-# vscode:// links -> VS Code; folders -> Files (hexa-files); web pages and
-# other files -> the default browser chosen in Settings > Default apps
-# (~/.config/mimeapps.list), Firefox when none was chosen.
+# Minimal xdg-open (hexaOS has no desktop environment).
+# Folders -> Files (hexa-files); web pages and other files -> the default
+# browser chosen in Settings > Default apps (~/.config/mimeapps.list), Firefox
+# when none was chosen; other link types (vscode://, steam://... sent back by
+# a login page) -> the app that registered them, e.g. a Flatpak from the Store.
 [ -n "$1" ] || { echo "usage: xdg-open URL|FILE" >&2; exit 1; }
 target=$1
 case "$target" in
-    vscode:*|vscode-insiders:*) exec /usr/bin/code --open-url "$target" ;;
+    http:*|https:*|file:*|/*|about:*) ;;
+    [a-zA-Z]*:*)
+        # app links: whoever declares x-scheme-handler/SCHEME (GIO finds it)
+        exec gio open "$target" ;;
+esac
+case "$target" in
     file://*)
         # file:///path (spaces and such come %-encoded)
         target=$(printf '%s' "${target#file://}" | sed 's/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\x\1/g')
@@ -24,13 +29,25 @@ if command -v gio >/dev/null 2>&1; then
     browser=$(gio mime x-scheme-handler/https 2>/dev/null |
               sed -n "s/^Default application for .*: *//p" | head -n 1)
 fi
+# Where the browser's .desktop file is (user apps first, like GIO)
+desktop_file() (
+    IFS=:
+    for d in "${XDG_DATA_HOME:-$HOME/.local/share}" ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
+        [ -f "$d/applications/$1" ] && { echo "$d/applications/$1"; exit 0; }
+    done
+    exit 1
+)
 case "$browser" in
-    ''|firefox.desktop)
-        /usr/bin/firefox "$target" >/dev/null 2>&1 & ;;
+    ''|firefox.desktop) ;;
     *)
-        # another browser (often a Flatpak from the Store): GIO starts it from
-        # its .desktop file (gio takes URLs and paths), Firefox if that fails
-        ( gio open "$target" >/dev/null 2>&1 ||
-          /usr/bin/firefox "$target" >/dev/null 2>&1 ) & ;;
+        # another browser (often a Flatpak from the Store), started from its
+        # .desktop file with the page; "gio launch" rather than "gio open",
+        # which would pick the app of the file's type for local files
+        if file=$(desktop_file "$browser"); then
+            ( gio launch "$file" "$target" >/dev/null 2>&1 ||
+              /usr/bin/firefox "$target" >/dev/null 2>&1 ) &
+            exit 0
+        fi ;;
 esac
+/usr/bin/firefox "$target" >/dev/null 2>&1 &
 exit 0

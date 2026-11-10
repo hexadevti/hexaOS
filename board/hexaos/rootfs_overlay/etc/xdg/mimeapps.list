@@ -1,6 +1,6 @@
-# Default apps for links (read by Firefox and VS Code through GLib)
+# Default apps for links (read by GTK apps through GLib; Settings > Default
+# apps writes the user's choice to ~/.config/mimeapps.list)
 [Default Applications]
-x-scheme-handler/vscode=code-url-handler.desktop
 x-scheme-handler/http=firefox.desktop
 x-scheme-handler/https=firefox.desktop
 text/html=firefox.desktop

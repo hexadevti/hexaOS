@@ -1,0 +1,9 @@
+config BR2_PACKAGE_HEXA_PORTAL
+	bool "hexa-portal"
+	depends on BR2_PACKAGE_LIBGLIB2
+	depends on BR2_PACKAGE_DBUS
+	help
+	  A small desktop portal (org.freedesktop.portal.Desktop) so
+	  Flatpak apps can open links in the default browser and open
+	  files and folders, and read the appearance settings. Started
+	  by D-Bus on demand.

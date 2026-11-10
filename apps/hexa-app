@@ -2,11 +2,11 @@
 # hexaOS apps: each folder here is one Flatpak app (com.hexaos.NAME/com.hexaos.NAME.yml).
 # Run on hexaOS itself (or from the VS Code tasks "App: ..."):
 #
-#   ./hexa-app install com.hexaos.Hello     build, install for this user + Start menu entry
-#   ./hexa-app run com.hexaos.Hello         run it
-#   ./hexa-app build com.hexaos.Hello       only build (into the local repo)
-#   ./hexa-app bundle com.hexaos.Hello      single file com.hexaos.Hello.flatpak for another machine
-#   ./hexa-app uninstall com.hexaos.Hello   remove it and its Start menu entry
+#   ./hexa-app install com.hexaos.Store     build, install for this user + Start menu entry
+#   ./hexa-app run com.hexaos.Store         run it
+#   ./hexa-app build com.hexaos.Store       only build (into the local repo)
+#   ./hexa-app bundle com.hexaos.Store      single file com.hexaos.Store.flatpak for another machine
+#   ./hexa-app uninstall com.hexaos.Store   remove it and its Start menu entry
 #   ./hexa-app list                         the apps in this folder
 #   ./hexa-app setup                        first time only: flatpak-builder + GNOME runtime
 #   ./hexa-app clean                        delete build files

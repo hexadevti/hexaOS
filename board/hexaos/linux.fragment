@@ -114,7 +114,7 @@ CONFIG_MODIFY_LDT_SYSCALL=y
 # wait on events/mutexes without a round trip to wineserver (faster games)
 CONFIG_NTSYNC=y
 
-# Firefox/VS Code sandbox and rootless containers
+# Firefox and Flatpak sandboxes, rootless containers
 CONFIG_NAMESPACES=y
 CONFIG_USER_NS=y
 CONFIG_PID_NS=y

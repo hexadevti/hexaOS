@@ -90,7 +90,7 @@
             "id": "app",
             "type": "pickString",
             "description": "Which app?",
-            "options": ["com.hexaos.Store", "com.hexaos.Hello"],
+            "options": ["com.hexaos.Store"],
             "default": "com.hexaos.Store"
         }
     ]

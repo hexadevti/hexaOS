@@ -15,7 +15,7 @@ BR2_GENERATE_LOCALE="en_US.UTF-8"
 BR2_TARGET_TZ_INFO=y
 BR2_TARGET_LOCALTIME="Etc/UTC"
 BR2_ROOTFS_DEVICE_TABLE="system/device_table.txt $(BR2_EXTERNAL_HEXAOS_PATH)/board/hexaos/device_table.txt"
-# Prebuilt binaries (Firefox, VS Code) are already optimized: do not strip
+# Prebuilt binaries (Firefox) are already optimized: do not strip
 BR2_STRIP_EXCLUDE_DIRS="/opt"
 BR2_ROOTFS_USERS_TABLES="$(BR2_EXTERNAL_HEXAOS_PATH)/board/hexaos/users.txt"
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_HEXAOS_PATH)/board/hexaos/rootfs_overlay"
@@ -93,7 +93,7 @@ BR2_PACKAGE_MESA3D_OPENGL_GLX=y
 BR2_PACKAGE_VULKAN_LOADER=y
 BR2_PACKAGE_LIBVA=y
 BR2_PACKAGE_INTEL_MEDIADRIVER=y
-# X11 libraries (no X server) for Firefox/VS Code, and Xwayland for X11 apps
+# X11 libraries (no X server) for Firefox, and Xwayland for X11 apps
 BR2_PACKAGE_XORG7=y
 BR2_PACKAGE_LIBEPOXY=y
 BR2_PACKAGE_WESTON_XWAYLAND=y
@@ -126,11 +126,11 @@ BR2_PACKAGE_WIREGUARD_TOOLS_WG_QUICK=y
 BR2_PACKAGE_IPROUTE2=y
 # Web and development
 BR2_PACKAGE_HEXA_FIREFOX=y
-BR2_PACKAGE_HEXA_VSCODE=y
 BR2_PACKAGE_HEXA_DXVK=y
 BR2_PACKAGE_HEXA_TASKMGR=y
 BR2_PACKAGE_HEXA_SETTINGS=y
 BR2_PACKAGE_HEXA_POWER=y
+BR2_PACKAGE_HEXA_PORTAL=y
 # File manager (hexa-files)
 BR2_PACKAGE_HEXA_FILES=y
 # Flatpak: apps from Flathub (Steam, with its own 32-bit libraries) and the

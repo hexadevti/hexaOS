@@ -10,10 +10,15 @@ hexa-launcher                adds or removes an app's Start menu entry
 com.hexaos.Store/            the hexaOS Store: Flathub search, install, update, remove
                              (also built into the image as /usr/bin/hexa-store,
                              package/hexa-store, so it comes preinstalled)
-com.hexaos.Hello/            the smallest app: copy it to start a new one
-  com.hexaos.Hello.yml       Flatpak manifest (runtime, permissions, build steps)
-  src/main.c, src/Makefile   the program
-  data/                      .desktop file, metainfo, icon (SVG)
+```
+
+Each app folder has the same layout:
+
+```
+com.hexaos.NAME/
+  com.hexaos.NAME.yml        Flatpak manifest (runtime, permissions, build steps)
+  src/                       the program and its Makefile
+  data/                      .desktop file, metainfo, icon
 ```
 
 ## First time
@@ -44,10 +49,11 @@ desktop (the Store has a button for it, or sign out).
 
 ## A new app
 
-1. `cp -r apps/com.hexaos.Hello apps/com.hexaos.MyApp`
-2. Rename `Hello` to `MyApp` in the file names and inside the files (manifest
-   `id`, `command`, the `.desktop` and metainfo files, and the application id
-   in `main.c`: it must be the same as the Flatpak id).
+1. Create `apps/com.hexaos.MyApp/` with the layout above; the Store's folder
+   is a working example of each file.
+2. Use `com.hexaos.MyApp` everywhere: the folder, the manifest file name and
+   its `id`, the `.desktop` and metainfo file names, and the GTK application
+   id in the program (it must be the same as the Flatpak id).
 3. Add `com.hexaos.MyApp` to `inputs > app > options` in `.vscode/tasks.json`.
 4. Ask only for the permissions the app needs in `finish-args`
    (see the Store's manifest for host commands and files).
@@ -80,5 +86,6 @@ too: `flatpak run com.hexaos.Store --add-to-menu ID` / `--remove-from-menu ID`.
 - `hexa-app` runs flatpak-builder from Flathub (`org.flatpak.Builder`), so the
   system does not need it, and passes `--disable-rofiles-fuse` because the FUSE
   module is not loaded by default.
-- The warning "Failed to read portal settings" is harmless: hexaOS has no
-  xdg-desktop-portal.
+- Apps open links and files through the portal (`org.freedesktop.portal.Desktop`):
+  hexaOS has a small one, `package/hexa-portal` (OpenURI and Settings only), so
+  portals for file choosers, screenshots and such are not there.

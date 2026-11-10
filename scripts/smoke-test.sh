@@ -61,14 +61,11 @@ type_text() {
         sleep "${WINE_WAIT:-60}"
         echo "screendump $SHOTS/3b-wine.png -f png"
     fi
-    # Open Firefox (fourth panel icon) and VS Code (fifth)
+    # Open Firefox (fourth panel icon)
     if [ "${APPS_TEST:-1}" = 1 ]; then
         python3 "$(dirname "$0")/qmp-click.py" "$QMP_SOCK" "${FIREFOX_X:-110}" 15 1280 800 >&2 || true
         sleep "${APP_WAIT:-60}"
         echo "screendump $SHOTS/3c-firefox.png -f png"
-        python3 "$(dirname "$0")/qmp-click.py" "$QMP_SOCK" "${VSCODE_X:-140}" 15 1280 800 >&2 || true
-        sleep "${APP_WAIT:-60}"
-        echo "screendump $SHOTS/3d-vscode.png -f png"
     fi
     # Switch to the text login (tty2) and check drivers and logs
     echo "sendkey ctrl-alt-f2"

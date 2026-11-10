@@ -8,7 +8,7 @@ It boots via UEFI on x86-64 PCs and in QEMU. Main target: Samsung Galaxy Book4 P
 - Laptop drivers: Intel AX211 Wi-Fi, Intel Arc graphics, I2C touchpad, Intel SOF audio
 - Intel graphics acceleration: OpenGL (Mesa iris), Vulkan (ANV) and hardware video decoding (VA-API)
 - 64-bit Wine (WoW64) with OpenGL, Vulkan and DXVK (DirectX 9/10/11 -> Vulkan) for games
-- Firefox (YouTube, claude.ai) and VS Code; Python 3, git, Docker and Claude Code
+- Firefox (YouTube, claude.ai); Python 3, git, Docker and Claude Code
 - Sound through PipeWire (PulseAudio compatible)
 
 ## Layout
@@ -31,7 +31,7 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/bin/hexa-bluetooth          Bluetooth for the taskbar and Settings (status, list, power, scan,
                                   pair, connect, disconnect, remove)
   usr/bin/xdg-open                opens links: web -> the default browser (Settings > Default apps;
-                                  Firefox if none), vscode:// -> VS Code (GitHub login), folders -> Files
+                                  Firefox if none), other links (vscode://...) -> the app that registered them, folders -> Files
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
   etc/hexaos/setup.conf           values for hexa-setup, e.g. Wi-Fi password (not in git;
                                   template: board/hexaos/setup.conf.example)
@@ -44,7 +44,6 @@ board/hexaos/rootfs_overlay/      files copied into the system
 package/hexa-wine/                64-bit Wine with WoW64 (Wayland driver)
 package/hexa-dxvk/                DXVK: DirectX 9/10/11 on Vulkan for Wine
 package/hexa-firefox/             Firefox ESR (official Mozilla binary)
-package/hexa-vscode/              Visual Studio Code (official Microsoft binary)
 package/hexa-sof-bin/             Meteor Lake audio firmware
 package/hexa-alsa-ucm-conf/       sound card profiles (UCM): built-in and headset microphones
 package/hexa-max98390/            speaker amplifier driver (MAX98390, Galaxy Book4/5)
@@ -54,6 +53,7 @@ package/hexa-flatpak/             Flatpak, for apps from Flathub such as Steam, 
 package/hexa-libostree/           its libraries (libostree without composefs, which needs
 package/hexa-appstream/           newer kernel headers than the toolchain's)
 package/hexa-libfyaml/
+package/hexa-portal/              desktop portal: Flatpak apps open links (default browser) and files
 package/hexa-store/               the Store (apps/com.hexaos.Store) built into the system
 patches/                          tweaks to Buildroot packages (splash colors; Weston: Alt+Tab,
                                   Windows-style taskbar and Start menu with folders (right click
@@ -68,7 +68,7 @@ scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
 scripts/install-ssd.ps1           installs/updates hexaOS on a secondary SSD (dual boot)
-apps/                             hexaOS apps packaged as Flatpaks (Store, Hello template):
+apps/                             hexaOS apps packaged as Flatpaks (the Store):
                                   see apps/README.md; the Store also comes built in
 ```
 
@@ -119,7 +119,7 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Volume (command line)      | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 70%` (or `alsamixer`) |
 | Speakers check             | `dmesg \| grep -i max98390` (4 amplifiers), `ls /sys/bus/i2c/drivers/max98390-hda` |
 | Web browser / YouTube      | Firefox icon on the taskbar                             |
-| Programming                | VS Code icon on the taskbar, or `code folder/`          |
+| Programming                | VS Code from the Store (search "Visual Studio Code")    |
 | Full Ubuntu (apt)          | `hexa-dev` (Docker container sharing your home folder)  |
 | Apps from Flathub          | Store (Start menu > Apps): search, install, update, remove; adds them to the Start menu's Apps folder. Command line: `flatpak install --user flathub ID` |
 | VPN (WireGuard, e.g. Proton) | download a WireGuard config from your VPN account (Proton: account.protonvpn.com > Downloads), then `hexa-vpn import file.conf` once, `hexa-vpn up` / `hexa-vpn down` / `hexa-vpn status`. VPN apps that need NetworkManager (such as the Proton VPN app) cannot connect on hexaOS |
