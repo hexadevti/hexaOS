@@ -1,0 +1,11 @@
+config BR2_PACKAGE_HEXA_STORE
+	bool "hexa-store"
+	depends on BR2_PACKAGE_LIBGTK3
+	depends on BR2_PACKAGE_HEXA_FLATPAK
+	help
+	  The hexaOS Store: finds, installs, updates and removes Flatpak
+	  apps from Flathub and adds them to the Start menu.
+
+	  Built from apps/com.hexaos.Store/src, the same source as the
+	  Flatpak app, so it comes with the system (no GNOME runtime
+	  needed). Outside the sandbox it runs flatpak directly.

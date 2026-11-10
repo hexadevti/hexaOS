@@ -8,6 +8,8 @@ itself, from VS Code or the terminal, and it updates without rebuilding the imag
 hexa-app                     build / install / run / bundle / uninstall an app
 hexa-launcher                adds or removes an app's Start menu entry
 com.hexaos.Store/            the hexaOS Store: Flathub search, install, update, remove
+                             (also built into the image as /usr/bin/hexa-store,
+                             package/hexa-store, so it comes preinstalled)
 com.hexaos.Hello/            the smallest app: copy it to start a new one
   com.hexaos.Hello.yml       Flatpak manifest (runtime, permissions, build steps)
   src/main.c, src/Makefile   the program

@@ -107,8 +107,6 @@ BR2_PACKAGE_WIREPLUMBER=y
 BR2_PACKAGE_LUA=y
 BR2_PACKAGE_LUA_5_4=y
 BR2_PACKAGE_PULSEAUDIO=y
-# Flatpak: Flathub apps and the hexaOS apps in apps/ (installed per user)
-BR2_PACKAGE_FLATPAK=y
 # VPN: WireGuard (wg, wg-quick; used by hexa-vpn). wg-quick needs the full
 # "ip" from iproute2 (BusyBox's cannot add WireGuard links or fwmark rules)
 BR2_PACKAGE_WIREGUARD_TOOLS=y
@@ -123,8 +121,11 @@ BR2_PACKAGE_HEXA_SETTINGS=y
 BR2_PACKAGE_HEXA_POWER=y
 # File manager (hexa-files)
 BR2_PACKAGE_HEXA_FILES=y
-# Flatpak: apps from Flathub (Steam, with its own 32-bit libraries)
+# Flatpak: apps from Flathub (Steam, with its own 32-bit libraries) and the
+# hexaOS apps in apps/ (installed per user)
 BR2_PACKAGE_HEXA_FLATPAK=y
+# hexaOS Store (apps/com.hexaos.Store), built into the system
+BR2_PACKAGE_HEXA_STORE=y
 BR2_PACKAGE_DOCKER_ENGINE=y
 BR2_PACKAGE_DOCKER_CLI=y
 BR2_PACKAGE_PYTHON3=y

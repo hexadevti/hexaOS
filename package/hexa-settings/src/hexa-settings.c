@@ -1759,6 +1759,45 @@ build_display(void)
 	if (d)
 		g_dir_close(d);
 	g_ptr_array_sort(cards, (GCompareFunc) g_strcmp0);
+
+	/* Main screen: apps seen for the first time open there, and apps whose
+	 * last screen is not connected (patches/weston/0006-*) */
+	{
+		GPtrArray *items = g_ptr_array_new_with_free_func(g_free);
+		int connected = 0;
+
+		g_ptr_array_add(items, g_strdup(""));
+		g_ptr_array_add(items, g_strdup("Automatic (the first screen)"));
+		for (k = 0; k < cards->len; k++) {
+			const char *card = g_ptr_array_index(cards, k), *name = strchr(card, '-') + 1;
+			char *p = g_strdup_printf("/sys/class/drm/%s/status", card), *status = read_file(p);
+
+			if (g_strcmp0(status, "connected") == 0) {
+				gboolean builtin = g_str_has_prefix(name, "eDP") ||
+						   g_str_has_prefix(name, "LVDS") ||
+						   g_str_has_prefix(name, "DSI");
+
+				g_ptr_array_add(items, g_strdup(name));
+				g_ptr_array_add(items, builtin ?
+						g_strdup_printf("%s (built-in screen)", name) :
+						g_strdup(name));
+				connected++;
+			}
+			g_free(status);
+			g_free(p);
+		}
+		g_ptr_array_add(items, NULL);
+		if (connected > 1) {
+			list = section("Several screens");
+			add_row(list, "Main screen",
+				"Apps open on the screen they were last on. New apps, and apps "
+				"whose screen is not connected, open on this one.",
+				bound_combo("shell", "primary-output", "",
+					    (const char *const *) items->pdata), NULL);
+		}
+		g_ptr_array_free(items, TRUE);
+	}
+
 	for (k = 0; k < cards->len; k++) {
 		const char *card = g_ptr_array_index(cards, k), *name = strchr(card, '-') + 1;
 		char *p = g_strdup_printf("/sys/class/drm/%s/status", card), *status = read_file(p);

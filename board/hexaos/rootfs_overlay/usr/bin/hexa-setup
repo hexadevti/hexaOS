@@ -4,7 +4,7 @@
 # Safe to run again at any time: each step only changes what is not set yet.
 #
 # Steps: join the Wi-Fi network, check the internet (reach Google), set the
-# screen scale (e.g. 200%).
+# screen scale (e.g. 200%), choose the main screen.
 #
 # The values (Wi-Fi network and password, scale...) come from /etc/hexaos/setup.conf,
 # which only root can read, so this asks for your password (sudo) first.
@@ -12,7 +12,7 @@
 # Adding a step: write a step_NAME function and add NAME to STEPS.
 
 CONF=/etc/hexaos/setup.conf
-STEPS=(wifi google scale)
+STEPS=(wifi google scale screen)
 
 # shellcheck source=/usr/lib/hexaos/wifi.sh
 . /usr/lib/hexaos/wifi.sh
@@ -162,6 +162,68 @@ step_scale() {
         ok "Scale already $((SCALE * 100))% on:$list."
     else
         ok "Scale set to $((SCALE * 100))% on:$list."
+        note "It takes effect when the desktop restarts (Start menu > Power > Restart desktop)."
+    fi
+}
+
+# ------------------------------------------------------------ main screen
+
+step_screen() {
+    title "Main screen"
+    local user home ini before c o builtin=() external=() all=() want=
+    if [ -z "$PRIMARY_SCREEN" ]; then
+        note "PRIMARY_SCREEN is not set in $CONF: skipped."
+        return
+    fi
+    user=${SUDO_USER:-hexa}
+    [ "$user" = root ] && user=hexa
+    home=$(awk -F: -v u="$user" '$1 == u {print $6}' /etc/passwd)
+    if [ -z "$home" ] || [ ! -d "$home" ]; then
+        fail "User \"$user\" was not found."
+        return
+    fi
+
+    # Connected screens: built-in (eDP, LVDS, DSI) and external (HDMI, DP...)
+    for c in /sys/class/drm/card*-*; do
+        [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
+        c=${c##*/}
+        o=${c#card*-}
+        all+=("$o")
+        case $o in
+            eDP*|LVDS*|DSI*) builtin+=("$o") ;;
+            *) external+=("$o") ;;
+        esac
+    done
+
+    case $PRIMARY_SCREEN in
+        internal|built-in|builtin) want=${builtin[0]} ;;
+        external) want=${external[0]} ;;
+        *)
+            for o in "${all[@]}"; do
+                [ "$o" = "$PRIMARY_SCREEN" ] && want=$o
+            done
+            ;;
+    esac
+    if [ -z "$want" ]; then
+        if [ "$PRIMARY_SCREEN" = external ]; then
+            note "No external screen is connected now: connect it and run Setup again."
+        else
+            fail "Screen \"$PRIMARY_SCREEN\" is not connected (connected:${all[*]/#/ })."
+        fi
+        return
+    fi
+
+    ini=$home/.config/hexaos/desktop.ini
+    before=$(cat "$ini" 2>/dev/null)
+    # Same as choosing it in Settings > Display > Main screen
+    if ! sudo -u "$user" HOME="$home" hexa-settings --set shell primary-output "$want"; then
+        fail "Could not save the main screen."
+        return
+    fi
+    if [ "$(cat "$ini" 2>/dev/null)" = "$before" ]; then
+        ok "Main screen already $want."
+    else
+        ok "Main screen set to $want."
         note "It takes effect when the desktop restarts (Start menu > Power > Restart desktop)."
     fi
 }

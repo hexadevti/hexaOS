@@ -1,0 +1,361 @@
+desktop-shell: apps open on the screen they were last on, else the main one
+
+- Each app (by its app id) opens on the screen it was last on: the screen
+  of its window when it closed or when a drag of it ended. Kept in
+  ~/.config/hexaos/window-screens, one "SCREEN<tab>APP-ID" line each.
+- When that screen is not connected, or the app is new, the window opens
+  on the main screen: [shell] primary-output=NAME (e.g. HDMI-A-1), chosen
+  in Settings > Display or by hexa-setup. Without it, the first screen.
+- Dialogs open on their parent window's screen.
+- The same goes for windows that open maximized or full screen (Weston
+  used the screen with the keyboard focus). Before this, new windows
+  opened on the screen under the pointer.
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index 7789e46..b4636f1 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -42,6 +42,7 @@
+ #include <libweston/config-parser.h>
+ #include "shared/helpers.h"
+ #include "shared/timespec-util.h"
++#include "shared/xalloc.h"
+ #include <libweston/shell-utils.h>
+ #include <libweston/desktop.h>
+ 
+@@ -578,6 +579,10 @@ shell_configuration(struct desktop_shell *shell)
+ 				       "allow-zap", &allow_zap, true);
+ 	shell->allow_zap = allow_zap;
+ 
++	/* hexaOS: the main screen, e.g. HDMI-A-1 (Settings > Display) */
++	weston_config_section_get_string(section, "primary-output",
++					 &shell->hexa.primary_output, NULL);
++
+ 	shell->binding_modifier = weston_config_get_binding_modifier(config, MODIFIER_SUPER);
+ 
+ 	weston_config_section_get_string(section, "animation", &s, "none");
+@@ -1132,6 +1137,8 @@ constrain_position(struct weston_move_grab *move)
+ static void
+ set_maximized_on(struct shell_surface *shsurf, bool maximized,
+ 		 struct weston_output *output);
++static void
++remember_window_screen(struct shell_surface *shsurf);
+ 
+ /* The screen whose top edge the pointer is on, else NULL */
+ static struct weston_output *
+@@ -1340,6 +1347,9 @@ move_grab_button(struct weston_pointer_grab *grab,
+ 				weston_output_contains_coord(output, move->start);
+ 			set_maximized_on(shsurf, true, output);
+ 		}
++		/* hexaOS: maybe dragged to another screen */
++		if (shsurf && shsurf->desktop_surface)
++			remember_window_screen(shsurf);
+ 		move_grab_end(move);
+ 	}
+ }
+@@ -2077,6 +2087,190 @@ shell_surface_center_on_output(struct shell_surface *shsurf,
+ 	weston_view_set_position_with_offset(shsurf->view, pos, offset);
+ }
+ 
++/*
++ * hexaOS: each app opens on the screen it was last on, else on the main
++ * screen. Kept per app id in ~/.config/hexaos/window-screens, one
++ * "SCREEN<tab>APP-ID" line each (e.g. "HDMI-A-1	firefox"). A window's screen
++ * is noted when it closes and when a drag of it ends.
++ */
++struct app_screen {
++	struct wl_list link;
++	char *app_id;
++	char *output;
++};
++
++static void
++app_screens_load(struct desktop_shell *shell)
++{
++	const char *home = getenv("HOME");
++	char *line = NULL, *tab;
++	size_t size = 0;
++	ssize_t len;
++	FILE *f;
++
++	wl_list_init(&shell->hexa.app_screens);
++	if (!home || asprintf(&shell->hexa.app_screens_path,
++			      "%s/.config/hexaos/window-screens", home) < 0) {
++		shell->hexa.app_screens_path = NULL;
++		return;
++	}
++	f = fopen(shell->hexa.app_screens_path, "r");
++	if (!f)
++		return;
++	while ((len = getline(&line, &size, f)) > 0) {
++		struct app_screen *as;
++
++		if (line[len - 1] == '\n')
++			line[len - 1] = '\0';
++		tab = strchr(line, '\t');
++		if (!tab || tab == line || !tab[1])
++			continue;
++		*tab = '\0';
++		as = xzalloc(sizeof *as);
++		as->output = xstrdup(line);
++		as->app_id = xstrdup(tab + 1);
++		wl_list_insert(shell->hexa.app_screens.prev, &as->link);
++	}
++	free(line);
++	fclose(f);
++}
++
++static void
++app_screens_save(struct desktop_shell *shell)
++{
++	struct app_screen *as;
++	char *tmp;
++	FILE *f;
++
++	if (!shell->hexa.app_screens_path ||
++	    asprintf(&tmp, "%s.new", shell->hexa.app_screens_path) < 0)
++		return;
++	f = fopen(tmp, "w");
++	if (f) {
++		wl_list_for_each(as, &shell->hexa.app_screens, link)
++			fprintf(f, "%s\t%s\n", as->output, as->app_id);
++		if (fclose(f) == 0)
++			rename(tmp, shell->hexa.app_screens_path);
++		else
++			unlink(tmp);
++	}
++	free(tmp);
++}
++
++static void
++app_screens_free(struct desktop_shell *shell)
++{
++	struct app_screen *as, *next;
++
++	wl_list_for_each_safe(as, next, &shell->hexa.app_screens, link) {
++		wl_list_remove(&as->link);
++		free(as->app_id);
++		free(as->output);
++		free(as);
++	}
++	free(shell->hexa.app_screens_path);
++}
++
++/* The connected screen with this name (e.g. HDMI-A-1), else NULL */
++static struct weston_output *
++output_by_name(struct weston_compositor *compositor, const char *name)
++{
++	struct weston_output *output;
++
++	if (!name || !*name)
++		return NULL;
++	wl_list_for_each(output, &compositor->output_list, link)
++		if (!output->destroying && strcmp(output->name, name) == 0)
++			return output;
++	return NULL;
++}
++
++/* An app's own windows, not its dialogs (those follow their parent) */
++static const char *
++shell_surface_app_id(struct shell_surface *shsurf)
++{
++	const char *app_id;
++
++	if (!shsurf->desktop_surface ||
++	    weston_desktop_surface_get_parent(shsurf->desktop_surface))
++		return NULL;
++	app_id = weston_desktop_surface_get_app_id(shsurf->desktop_surface);
++	return app_id && *app_id ? app_id : NULL;
++}
++
++/* Notes the screen a window is on, for the next time its app opens */
++static void
++remember_window_screen(struct shell_surface *shsurf)
++{
++	struct desktop_shell *shell = shsurf->shell;
++	const char *app_id = shell_surface_app_id(shsurf);
++	struct weston_output *output;
++	struct app_screen *as;
++
++	if (!app_id ||
++	    !weston_surface_is_mapped(
++		    weston_desktop_surface_get_surface(shsurf->desktop_surface)))
++		return;
++	output = shell_surface_overlapping_output(shsurf);
++	if (!output)
++		output = shsurf->output;
++	if (!output || !output->name)
++		return;
++
++	wl_list_for_each(as, &shell->hexa.app_screens, link) {
++		if (strcmp(as->app_id, app_id) != 0)
++			continue;
++		if (strcmp(as->output, output->name) == 0)
++			return;
++		free(as->output);
++		as->output = xstrdup(output->name);
++		app_screens_save(shell);
++		return;
++	}
++	as = xzalloc(sizeof *as);
++	as->app_id = xstrdup(app_id);
++	as->output = xstrdup(output->name);
++	wl_list_insert(shell->hexa.app_screens.prev, &as->link);
++	app_screens_save(shell);
++}
++
++/* The screen a new window opens on: its parent's (dialogs), else the one
++ * its app was last on, else the main screen, else the first one */
++static struct weston_output *
++new_window_output(struct shell_surface *shsurf)
++{
++	struct desktop_shell *shell = shsurf->shell;
++	struct weston_compositor *compositor = shell->compositor;
++	struct weston_desktop_surface *parent =
++		weston_desktop_surface_get_parent(shsurf->desktop_surface);
++	const char *app_id = shell_surface_app_id(shsurf);
++	struct weston_output *output;
++	struct app_screen *as;
++
++	if (parent) {
++		struct shell_surface *pss =
++			weston_desktop_surface_get_user_data(parent);
++
++		if (pss && weston_surface_is_mapped(
++				weston_desktop_surface_get_surface(parent)))
++			return shell_surface_find_output(pss);
++	}
++	if (app_id) {
++		wl_list_for_each(as, &shell->hexa.app_screens, link) {
++			if (strcmp(as->app_id, app_id) != 0)
++				continue;
++			output = output_by_name(compositor, as->output);
++			if (output)
++				return output;
++			break;
++		}
++	}
++	output = output_by_name(compositor, shell->hexa.primary_output);
++	if (output)
++		return output;
++	return weston_shell_utils_get_default_output(compositor);
++}
++
+ static void
+ unset_maximized(struct shell_surface *shsurf)
+ {
+@@ -2479,6 +2673,8 @@ desktop_surface_removed(struct weston_desktop_surface *desktop_surface,
+ 		return;
+ 
+ 	taskbar_remove(shsurf);
++	/* hexaOS: its app opens on this screen next time */
++	remember_window_screen(shsurf);
+ 
+ 	wl_list_for_each(seat, &shsurf->shell->compositor->seat_list, link) {
+ 		struct shell_seat *shseat = get_shell_seat(seat);
+@@ -2580,8 +2776,9 @@ set_position_from_xwayland(struct shell_surface *shsurf)
+ }
+ 
+ /*
+- * hexaOS: where a new window opens. On the screen under the pointer, inside
+- * its work area (the taskbar excluded). A window bigger than that screen
++ * hexaOS: where a new window opens. On the screen its app was last on, else
++ * on the main screen (new_window_output), inside its work area (the taskbar
++ * excluded). A window bigger than that screen
+  * (e.g. it remembered its size from a bigger or less scaled screen) is asked
+  * to fit it, and is centered when its new size arrives.
+  */
+@@ -2591,30 +2788,15 @@ place_new_window(struct desktop_shell *shell, struct shell_surface *shsurf)
+ 	struct weston_compositor *compositor = shell->compositor;
+ 	struct weston_surface *surface =
+ 		weston_desktop_surface_get_surface(shsurf->desktop_surface);
+-	struct weston_output *output, *target = NULL;
+-	struct weston_seat *seat;
++	struct weston_output *target;
+ 	struct weston_coord_global pos;
+ 	struct weston_coord_surface offset;
+ 	struct weston_geometry geo;
+ 	pixman_rectangle32_t area;
+ 	int32_t x, y, w, h;
+ 
+-	pos.c = weston_coord(0, 0);
+-	wl_list_for_each(seat, &compositor->seat_list, link) {
+-		struct weston_pointer *pointer = weston_seat_get_pointer(seat);
+-
+-		if (pointer) {
+-			pos = pointer->pos;
+-			break;
+-		}
+-	}
+-	wl_list_for_each(output, &compositor->output_list, link) {
+-		if (!output->destroying &&
+-		    weston_output_contains_coord(output, pos)) {
+-			target = output;
+-			break;
+-		}
+-	}
++	/* hexaOS: the screen its app was last on, else the main screen */
++	target = new_window_output(shsurf);
+ 	if (!target)
+ 		target = weston_shell_utils_get_default_output(compositor);
+ 	if (!target) {
+@@ -2896,8 +3078,9 @@ set_fullscreen(struct shell_surface *shsurf, bool fullscreen,
+ 	if (fullscreen) {
+ 		/* handle clients launching in fullscreen */
+ 		if (output == NULL && !weston_surface_is_mapped(surface)) {
+-			/* Set the output to the one that has focus currently. */
+-			output = weston_shell_utils_get_focused_output(surface->compositor);
++			/* hexaOS: on its app's last screen, else the main
++			 * one (Weston used the focused screen) */
++			output = new_window_output(shsurf);
+ 		}
+ 
+ 		shell_surface_set_output(shsurf, output);
+@@ -3049,7 +3232,9 @@ set_maximized_on(struct shell_surface *shsurf, bool maximized,
+ 		if (output)
+ 			;
+ 		else if (!weston_surface_is_mapped(surface))
+-			output = weston_shell_utils_get_focused_output(surface->compositor);
++			/* hexaOS: opens maximized: on its app's last
++			 * screen, else the main one */
++			output = new_window_output(shsurf);
+ 		else	/* hexaOS: its own screen, even when minimized */
+ 			output = shell_surface_find_output(shsurf);
+ 
+@@ -5629,6 +5814,8 @@ shell_destroy(struct wl_listener *listener, void *data)
+ 	desktop_shell_destroy_layer(&shell->fullscreen_layer);
+ 
+ 	free(shell->client);
++	free(shell->hexa.primary_output);
++	app_screens_free(shell);
+ 	free(shell);
+ }
+ 
+@@ -5770,6 +5957,8 @@ wet_shell_init(struct weston_compositor *ec,
+ 		return -1;
+ 
+ 	shell->compositor = ec;
++	/* hexaOS: the screen each app was last on */
++	app_screens_load(shell);
+ 
+ 	if (!weston_compositor_add_destroy_listener_once(ec,
+ 							 &shell->destroy_listener,
+diff --git a/desktop-shell/shell.h b/desktop-shell/shell.h
+index f847f2f..f5fa0f7 100644
+--- a/desktop-shell/shell.h
++++ b/desktop-shell/shell.h
+@@ -155,6 +155,14 @@ struct desktop_shell {
+ 		struct weston_view *popup_view;
+ 		struct wl_listener popup_destroy_listener;
+ 		struct weston_coord_global popup_pos;
++
++		/* the main screen: new windows of an app seen for the first
++		 * time open there ([shell] primary-output, Settings > Display) */
++		char *primary_output;
++		/* the screen each app was last on (struct app_screen), kept
++		 * in ~/.config/hexaos/window-screens */
++		struct wl_list app_screens;
++		char *app_screens_path;
+ 	} hexa;
+ 
+ 	struct wl_listener seat_create_listener;

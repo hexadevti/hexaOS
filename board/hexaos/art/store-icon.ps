@@ -1,0 +1,15 @@
+%!PS
+% 24x24 panel icon: Store (hexaOS Store, Flatpak apps): a shopping bag
+(common.ps) run
+gsave
+  12 12 11.5 hexpath clip
+  << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 24 24]
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [blue] /C1 [cyan] /N 1 >>
+     /Extend [true true] >> shfill
+grestore
+% Bag: a body a little narrower at the bottom, then its handle
+bg setrgbcolor
+newpath 6.5 14.6 moveto 17.5 14.6 lineto 16.6 6.4 lineto 7.4 6.4 lineto closepath fill
+1.3 setlinewidth 1 setlinecap
+newpath 9.4 14.6 moveto 9.4 15.4 lineto 12 15.4 2.6 180 0 arcn 14.6 14.6 lineto stroke
+showpage

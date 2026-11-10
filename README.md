@@ -52,16 +52,18 @@ package/hexa-flatpak/             Flatpak, for apps from Flathub such as Steam, 
 package/hexa-libostree/           its libraries (libostree without composefs, which needs
 package/hexa-appstream/           newer kernel headers than the toolchain's)
 package/hexa-libfyaml/
+package/hexa-store/               the Store (apps/com.hexaos.Store) built into the system
 patches/                          tweaks to Buildroot packages (splash colors; Weston: Alt+Tab,
                                   Windows-style taskbar and Start menu with folders, maximize on
                                   the right screen, clipboard keeps plain text, window snapping,
-                                  new windows fit their screen, scale fixes)
+                                  new windows fit their screen, scale fixes, apps reopen on
+                                  the screen they were last on, else on the main screen)
 scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
 scripts/install-ssd.ps1           installs/updates hexaOS on a secondary SSD (dual boot)
-apps/                             hexaOS apps packaged as Flatpaks, not part of the image
-                                  (Store, Hello template): see apps/README.md
+apps/                             hexaOS apps packaged as Flatpaks (Store, Hello template):
+                                  see apps/README.md; the Store also comes built in
 ```
 
 ## Requirements (Ubuntu / WSL)

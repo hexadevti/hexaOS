@@ -9,3 +9,10 @@ WIFI_PASSWORD='my-wifi-password'
 # Screen scale for every connected screen: 1 = 100%, 2 = 200%, 3 = 300%
 # (leave empty to skip). Takes effect when the desktop restarts.
 SCALE=2
+
+# Main screen: apps open on the screen they were last on; new apps, and apps
+# whose screen is not connected, open on this one. "external" (the first
+# external monitor, HDMI or DisplayPort), "internal" (the laptop's own
+# screen), or a screen name such as HDMI-A-1 (Settings > Display lists them).
+# Leave empty to skip. Takes effect when the desktop restarts.
+PRIMARY_SCREEN=external

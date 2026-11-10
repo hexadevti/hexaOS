@@ -891,6 +891,57 @@ on_refresh_updates(GtkButton *b, gpointer data)
 	refresh_updates();
 }
 
+/*
+ * First start: this user needs the Flathub remote and its catalog (names,
+ * descriptions, icons) before Discover finds anything. hexaOS ships the
+ * remote's file (package/hexa-flatpak); adding it again does nothing.
+ */
+static void
+flathub_ready(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	set_busy(NULL);
+	if (!ok) {
+		char *why = last_line(*err ? err : out), *t;
+
+		clear_list(search_list);
+		t = g_strdup_printf("Could not get Flathub ready (check the internet "
+				    "connection and open the Store again): %s", why);
+		list_note(search_list, t);
+		gtk_widget_show_all(search_list);
+		g_free(t);
+		g_free(why);
+	}
+	refresh_installed();
+	refresh_updates();
+}
+
+static void
+flathub_added(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	char *catalog = g_build_filename(appstream_dir, "flathub", NULL);
+	gboolean have = g_file_test(catalog, G_FILE_TEST_IS_DIR);
+
+	g_free(catalog);
+	if (have) {
+		/* ready from before (even if adding the remote failed now) */
+		flathub_ready(TRUE, "", "", data);
+	} else if (ok) {
+		set_busy("Downloading the Flathub catalog (first start)…");
+		run_host(ARGV("flatpak", "update", "--user", "--appstream", "flathub"),
+			 flathub_ready, NULL);
+	} else {
+		flathub_ready(FALSE, out, err, data);
+	}
+}
+
+static void
+prepare_flathub(void)
+{
+	set_busy("Getting Flathub ready…");
+	run_host(ARGV("flatpak", "remote-add", "--user", "--if-not-exists", "flathub",
+		      "/etc/flatpak/remotes.d/flathub.flatpakrepo"), flathub_added, NULL);
+}
+
 static void
 on_restart_bar(GtkInfoBar *bar, int response, gpointer data)
 {
@@ -1013,8 +1064,8 @@ activate(GtkApplication *app, gpointer data)
 	gtk_widget_show_all(win);
 	gtk_widget_grab_focus(search_entry);
 
-	refresh_installed();
-	refresh_updates();
+	/* then lists what is installed and what has updates */
+	prepare_flathub();
 }
 
 int
@@ -1041,6 +1092,7 @@ main(int argc, char **argv)
 	if (argc == 3 && strcmp(argv[1], "--remove-from-menu") == 0)
 		return remove_launcher(argv[2]) ? 0 : 1;
 
+	g_set_prgname(APP_ID);	/* GTK3 sends it as the Wayland app-id (taskbar icon) */
 	app = gtk_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
 	g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
 	status_code = g_application_run(G_APPLICATION(app), argc, argv);
