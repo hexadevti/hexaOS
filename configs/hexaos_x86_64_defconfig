@@ -107,6 +107,8 @@ BR2_PACKAGE_WIREPLUMBER=y
 BR2_PACKAGE_LUA=y
 BR2_PACKAGE_LUA_5_4=y
 BR2_PACKAGE_PULSEAUDIO=y
+# Flatpak: Flathub apps and the hexaOS apps in apps/ (installed per user)
+BR2_PACKAGE_FLATPAK=y
 # Web and development
 BR2_PACKAGE_HEXA_FIREFOX=y
 BR2_PACKAGE_HEXA_VSCODE=y

@@ -1,0 +1,62 @@
+#!/bin/sh
+# Adds or removes the Start menu entry of an installed Flatpak app.
+#   hexa-launcher add APP_ID      hexa-launcher remove APP_ID
+#
+# Entries are [launcher] sections in ~/.config/hexaos/apps.ini, which hexa-session
+# adds to the desktop config at login (so they show up after the desktop restarts).
+# The hexaOS Store writes the same file in the same format.
+set -eu
+
+CONF="$HOME/.config/hexaos"
+INI="$CONF/apps.ini"
+EXPORTS="$HOME/.local/share/flatpak/exports/share"
+FALLBACK_ICON=/usr/share/weston/icon_window.png
+
+cmd=${1:-}
+id=${2:-}
+case "$cmd" in add|remove) ;; *) echo "usage: $0 add|remove APP_ID" >&2; exit 2 ;; esac
+[ -n "$id" ] || { echo "usage: $0 add|remove APP_ID" >&2; exit 2; }
+
+mkdir -p "$CONF"
+[ -f "$INI" ] || printf '%s\n%s\n\n' \
+    "# Start menu entries for Flatpak apps (written by the hexaOS Store and apps/hexa-app)." \
+    "# Added to the desktop config at login by hexa-session." > "$INI"
+
+# Each entry is one block of lines, blocks separated by a blank line:
+# drop the block that has "app-id=$id"
+tmp=$(mktemp)
+awk -v id="$id" 'BEGIN { RS = ""; ORS = "\n\n" }
+    index("\n" $0 "\n", "\napp-id=" id "\n") == 0' "$INI" > "$tmp"
+mv "$tmp" "$INI"
+
+[ "$cmd" = remove ] && { rm -f "$CONF/icons/$id.png"; exit 0; }
+
+desktop="$EXPORTS/applications/$id.desktop"
+name=$id
+if [ -f "$desktop" ]; then
+    n=$(sed -n '/^\[Desktop Entry\]/,/^\[/{s/^Name=//p}' "$desktop" | head -n 1)
+    [ -n "$n" ] && name=$n
+fi
+
+# Biggest PNG icon the app exports (Weston scales it down), else the one in
+# the Flathub catalog, else the generic window icon
+icon=$FALLBACK_ICON
+for f in "$EXPORTS"/icons/hicolor/256x256/apps/"$id".png \
+         "$EXPORTS"/icons/hicolor/128x128/apps/"$id".png \
+         "$EXPORTS"/icons/hicolor/96x96/apps/"$id".png \
+         "$EXPORTS"/icons/hicolor/64x64/apps/"$id".png \
+         "$EXPORTS"/icons/hicolor/48x48/apps/"$id".png \
+         "$HOME"/.local/share/flatpak/appstream/*/x86_64/active/icons/128x128/"$id".png; do
+    if [ -f "$f" ]; then icon=$f; break; fi
+done
+
+cat >> "$INI" <<EOF
+# app: $id
+[launcher]
+displayname=$name
+icon=$icon
+path=/usr/bin/flatpak run $id
+app-id=$id
+
+EOF
+echo "Start menu: added $name (shows up after the desktop restarts)"

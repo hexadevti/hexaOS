@@ -49,6 +49,8 @@ scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
 scripts/install-ssd.ps1           installs/updates hexaOS on a secondary SSD (dual boot)
+apps/                             hexaOS apps packaged as Flatpaks, not part of the image
+                                  (Store, Hello template): see apps/README.md
 ```
 
 ## Requirements (Ubuntu / WSL)
@@ -97,6 +99,7 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Web browser / YouTube      | Firefox icon on the taskbar                             |
 | Programming                | VS Code icon on the taskbar, or `code folder/`          |
 | Full Ubuntu (apt)          | `hexa-dev` (Docker container sharing your home folder)  |
+| Apps from Flathub          | Store (Start menu): search, install, update, remove; adds them to the Start menu. Command line: `flatpak install --user flathub ID` |
 | Windows program            | `wine program.exe`                                      |
 | Windows games (DirectX)    | `hexa-dxvk install` once, then `wine game.exe`          |
 | Claude Code (first time)   | `curl -fsSL https://claude.ai/install.sh \| bash`, then `claude` |

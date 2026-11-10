@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.hexaos.Store</id>
+  <name>Store</name>
+  <summary>Install, update and remove apps from Flathub</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <launchable type="desktop-id">com.hexaos.Store.desktop</launchable>
+  <description>
+    <p>The hexaOS app store: finds Flatpak apps on Flathub, installs, updates and
+    removes them, and adds them to the hexaOS Start menu.</p>
+  </description>
+</component>
