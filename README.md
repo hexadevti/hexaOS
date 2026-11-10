@@ -28,6 +28,7 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/bin/hexa-setup              applies this machine's settings (Start menu)
   usr/bin/hexa-power              restart / shut down (Start menu): a window on the desktop, a text menu otherwise
   usr/bin/hexa-steam              Steam (Start menu): installs it from Flathub on the first click
+  usr/bin/hexa-vpn                WireGuard VPN, e.g. Proton VPN (import, up, down, status)
   usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login),
                                   folders -> Files
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
@@ -52,13 +53,15 @@ package/hexa-libostree/           its libraries (libostree without composefs, wh
 package/hexa-appstream/           newer kernel headers than the toolchain's)
 package/hexa-libfyaml/
 patches/                          tweaks to Buildroot packages (splash colors; Weston: Alt+Tab,
-                                  Windows-style taskbar and Start menu, maximize on the right
-                                  screen, clipboard keeps plain text, window snapping, new
-                                  windows fit their screen, scale fixes)
+                                  Windows-style taskbar and Start menu with folders, maximize on
+                                  the right screen, clipboard keeps plain text, window snapping,
+                                  new windows fit their screen, scale fixes)
 scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
 scripts/install-ssd.ps1           installs/updates hexaOS on a secondary SSD (dual boot)
+apps/                             hexaOS apps packaged as Flatpaks, not part of the image
+                                  (Store, Hello template): see apps/README.md
 ```
 
 ## Requirements (Ubuntu / WSL)
@@ -110,6 +113,8 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Web browser / YouTube      | Firefox icon on the taskbar                             |
 | Programming                | VS Code icon on the taskbar, or `code folder/`          |
 | Full Ubuntu (apt)          | `hexa-dev` (Docker container sharing your home folder)  |
+| Apps from Flathub          | Store (Start menu > Apps): search, install, update, remove; adds them to the Start menu's Apps folder. Command line: `flatpak install --user flathub ID` |
+| VPN (WireGuard, e.g. Proton) | download a WireGuard config from your VPN account (Proton: account.protonvpn.com > Downloads), then `hexa-vpn import file.conf` once, `hexa-vpn up` / `hexa-vpn down` / `hexa-vpn status`. VPN apps that need NetworkManager (such as the Proton VPN app) cannot connect on hexaOS |
 | Windows program            | `wine program.exe`                                      |
 | Windows games (DirectX)    | `hexa-dxvk install` once, then `wine game.exe`          |
 | Claude Code (first time)   | `curl -fsSL https://claude.ai/install.sh \| bash`, then `claude` |

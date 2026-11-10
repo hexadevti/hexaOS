@@ -1,0 +1,36 @@
+# hexaOS Store: finds, installs, updates and removes Flatpak apps and puts
+# them in the Start menu. Build and install: apps/hexa-app install com.hexaos.Store
+id: com.hexaos.Store
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+command: hexa-store
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # every flatpak command runs on the host (flatpak-spawn --host)
+  - --talk-name=org.freedesktop.Flatpak
+  # Start menu entries and their icons
+  - --filesystem=xdg-config/hexaos:create
+  # icons and names of the apps: Flathub catalog and installed apps (read only;
+  # the files in exports are links into app)
+  - --filesystem=xdg-data/flatpak/appstream:ro
+  - --filesystem=xdg-data/flatpak/exports:ro
+  - --filesystem=xdg-data/flatpak/app:ro
+modules:
+  - name: hexa-store
+    buildsystem: simple
+    build-commands:
+      - make -C src PREFIX=/app install
+      - install -Dm644 data/com.hexaos.Store.desktop -t /app/share/applications
+      - install -Dm644 data/com.hexaos.Store.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 data/com.hexaos.Store.svg -t /app/share/icons/hicolor/scalable/apps
+      # PNG copies for the hexaOS Start menu (Weston reads PNG only)
+      - for s in 64 128; do mkdir -p /app/share/icons/hicolor/${s}x${s}/apps;
+        rsvg-convert -w $s -h $s data/com.hexaos.Store.svg
+        -o /app/share/icons/hicolor/${s}x${s}/apps/com.hexaos.Store.png; done
+    sources:
+      - type: dir
+        path: .

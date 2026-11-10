@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Store
+Comment=Install, update and remove apps from Flathub
+Exec=hexa-store
+Icon=com.hexaos.Store
+Categories=System;PackageManager;GTK;

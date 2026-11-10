@@ -1,0 +1,103 @@
+#!/bin/sh
+# hexa-vpn: WireGuard VPN (e.g. Proton VPN) with wg-quick
+#
+#   hexa-vpn import FILE.conf [NAME]  saves a WireGuard config downloaded from
+#                                     your VPN account (Proton: account.protonvpn.com
+#                                     > Downloads > WireGuard configuration)
+#   hexa-vpn up [NAME]                connects (NAME: see "list"; when left out,
+#                                     the only config or the last one used)
+#   hexa-vpn down                     disconnects
+#   hexa-vpn status                   connected or not, with traffic counters
+#   hexa-vpn list                     saved configs
+#   hexa-vpn remove NAME              deletes a saved config
+#
+# Configs are kept in /etc/wireguard, readable by root only (they hold the
+# private key). Runs itself through sudo (password of the hexa user).
+set -eu
+
+DIR=/etc/wireguard
+LAST=$DIR/.last
+
+usage() { sed -n '2,17s/^# \{0,1\}//p' "$0"; exit 2; }
+
+[ $# -ge 1 ] || usage
+if [ "$(id -u)" != 0 ]; then
+    exec sudo "$0" "$@"
+fi
+
+# A config name is also the network interface name: up to 15 letters,
+# digits and _=+.-
+iface_name() {
+    n=$(basename "$1" .conf | tr -c 'A-Za-z0-9_=+.\n-' '-' | cut -c1-15)
+    [ -n "$n" ] || n=vpn
+    echo "$n"
+}
+
+configs() { ls "$DIR" 2>/dev/null | sed -n 's/\.conf$//p'; }
+
+connected() { wg show interfaces 2>/dev/null; }
+
+case "$1" in
+    import)
+        [ $# -ge 2 ] && [ -f "$2" ] || { echo "No such file: ${2:-}" >&2; exit 1; }
+        grep -q '^\[Interface\]' "$2" && grep -q '^PrivateKey' "$2" ||
+            { echo "$2 is not a WireGuard config ([Interface] with a PrivateKey)" >&2; exit 1; }
+        name=$(iface_name "${3:-$2}")
+        install -d -m 700 "$DIR"
+        install -m 600 "$2" "$DIR/$name.conf"
+        echo "Saved as \"$name\". Connect with: hexa-vpn up $name"
+        ;;
+    up)
+        name=${2:-}
+        if [ -z "$name" ]; then
+            if [ "$(configs | wc -l)" = 1 ]; then
+                name=$(configs)
+            elif [ -f "$LAST" ]; then
+                name=$(cat "$LAST")
+            else
+                echo "Which one? hexa-vpn up NAME, with NAME from:" >&2
+                configs >&2
+                exit 1
+            fi
+        fi
+        [ -f "$DIR/$name.conf" ] || { echo "No config \"$name\" (see: hexa-vpn list)" >&2; exit 1; }
+        for i in $(connected); do
+            wg-quick down "$i"
+        done
+        wg-quick up "$name"
+        echo "$name" > "$LAST"
+        echo "Connected: $name"
+        ;;
+    down)
+        i=$(connected)
+        [ -n "$i" ] || { echo "Not connected"; exit 0; }
+        for n in $i; do
+            wg-quick down "$n"
+        done
+        echo "Disconnected"
+        ;;
+    status)
+        i=$(connected)
+        if [ -z "$i" ]; then
+            echo "Not connected"
+        else
+            for n in $i; do
+                echo "Connected: $n"
+                wg show "$n" endpoints | awk '{ print "  server:   " $2 }'
+                wg show "$n" transfer | awk '{ printf "  received: %.1f MB, sent: %.1f MB\n", $2/1e6, $3/1e6 }'
+            done
+        fi
+        ;;
+    list)
+        configs
+        ;;
+    remove)
+        [ $# -ge 2 ] && [ -f "$DIR/$2.conf" ] || { echo "No config \"${2:-}\"" >&2; exit 1; }
+        connected | grep -qx "$2" && wg-quick down "$2"
+        rm -f "$DIR/$2.conf"
+        echo "Removed \"$2\""
+        ;;
+    *)
+        usage
+        ;;
+esac

@@ -11,7 +11,8 @@ chmod 0755 "$TARGET_DIR/usr/sbin/hexa-session" "$TARGET_DIR/usr/bin/hexa-dev" \
     "$TARGET_DIR"/etc/init.d/S00psplash "$TARGET_DIR"/etc/init.d/S01keymap "$TARGET_DIR"/etc/init.d/S02growfs \
     "$TARGET_DIR"/etc/init.d/S41wired "$TARGET_DIR/usr/libexec/hexaos-wired" \
     "$TARGET_DIR/usr/bin/hexa-settings-tui" "$TARGET_DIR/usr/bin/hexa-setup" \
-    "$TARGET_DIR/usr/bin/hexa-power" "$TARGET_DIR/usr/bin/hexa-steam" "$TARGET_DIR"/etc/init.d/S12speakers \
+    "$TARGET_DIR/usr/bin/hexa-power" "$TARGET_DIR/usr/bin/hexa-steam" "$TARGET_DIR/usr/bin/hexa-vpn" \
+    "$TARGET_DIR"/etc/init.d/S12speakers \
     "$TARGET_DIR"/etc/init.d/S40iwd
 chmod 0440 "$TARGET_DIR/etc/sudoers.d/wheel" "$TARGET_DIR/etc/sudoers.d/power"
 

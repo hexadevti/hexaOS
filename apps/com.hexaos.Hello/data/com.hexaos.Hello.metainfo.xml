@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.hexaos.Hello</id>
+  <name>Hello</name>
+  <summary>Template hexaOS app</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <launchable type="desktop-id">com.hexaos.Hello.desktop</launchable>
+  <description><p>The smallest hexaOS app: copy it to start a new one.</p></description>
+</component>

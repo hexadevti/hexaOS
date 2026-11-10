@@ -1,0 +1,378 @@
+desktop-shell: folders in the Start menu
+
+A [launcher] with "folder=NAME" is not listed in the main Start menu but
+inside a folder: the main list shows one row for the folder (folder icon,
+name and an arrow) where its first launcher would be; clicking it shows
+the folder's launchers, with a "< NAME" row at the top to go back. The menu
+keeps one size, enough for the main list and for every folder.
+
+hexaOS uses it for the Flatpak apps (folder=Apps in ~/.config/hexaos/apps.ini,
+written by the hexaOS Store and apps/hexa-launcher).
+
+diff --git a/clients/desktop-shell.c b/clients/desktop-shell.c
+index 2ccc43a..aea45a7 100644
+--- a/clients/desktop-shell.c
++++ b/clients/desktop-shell.c
+@@ -109,6 +109,7 @@ struct menu_item {
+ 	struct wl_list link;	/* desktop::menu_items */
+ 	char *name;
+ 	char *app_id;		/* windows with this app id get this icon */
++	char *folder;		/* "folder=": shown inside that Start menu folder */
+ 	char *exec_name;	/* program name, also matched against app ids */
+ 	cairo_surface_t *icon;
+ 	bool pinned;		/* also shown on the taskbar */
+@@ -137,13 +138,29 @@ struct volume_state {
+ 	struct task reader_task;
+ };
+ 
++/* A line of the Start menu */
++enum menu_row_kind {
++	ROW_ITEM,		/* a [launcher] */
++	ROW_FOLDER,		/* opens a folder ("folder=" of its launchers) */
++	ROW_BACK,		/* in a folder: back to the main list */
++};
++
++struct menu_row {
++	enum menu_row_kind kind;
++	struct menu_item *item;	/* ROW_ITEM */
++	const char *folder;	/* ROW_FOLDER, ROW_BACK */
++};
++
+ struct start_menu {
+ 	struct desktop *desktop;
+ 	struct window *window;
+ 	struct widget *widget;
+ 	int width, height;
+-	int hover;		/* item under the pointer, -1 for none */
++	int hover;		/* row under the pointer, -1 for none */
+ 	bool closing;
++	char *folder;		/* open folder, NULL for the main list */
++	struct menu_row *rows;
++	int n_rows;
+ };
+ 
+ /* What a context menu (right click) entry does */
+@@ -1621,23 +1638,126 @@ start_menu_index_at(struct start_menu *menu, float x, float y)
+ 	    y < MENU_HEADER_HEIGHT)
+ 		return -1;
+ 	i = (int) ((y - MENU_HEADER_HEIGHT) / MENU_ITEM_HEIGHT);
+-	if (i >= wl_list_length(&menu->desktop->menu_items))
++	if (i >= menu->n_rows)
+ 		return -1;
+ 	return i;
+ }
+ 
+-static struct menu_item *
+-menu_item_at_index(struct desktop *desktop, int index)
++/* Rows of the open folder, or of the main list: launchers without a folder
++ * and one row per folder, where its first launcher would be */
++static void
++start_menu_build_rows(struct start_menu *menu)
+ {
+-	struct menu_item *item;
+-	int i = 0;
++	struct menu_item *item, *other;
++	struct menu_row *row;
++	bool seen;
+ 
+-	if (index < 0)
+-		return NULL;
+-	wl_list_for_each(item, &desktop->menu_items, link)
+-		if (i++ == index)
+-			return item;
+-	return NULL;
++	free(menu->rows);
++	menu->rows = xzalloc((wl_list_length(&menu->desktop->menu_items) + 1) *
++			     sizeof *menu->rows);
++	menu->n_rows = 0;
++
++	if (menu->folder) {
++		row = &menu->rows[menu->n_rows++];
++		row->kind = ROW_BACK;
++		row->folder = menu->folder;
++	}
++	wl_list_for_each(item, &menu->desktop->menu_items, link) {
++		if (menu->folder) {
++			if (!item->folder || strcmp(item->folder, menu->folder) != 0)
++				continue;
++		} else if (item->folder) {
++			/* only the folder's first launcher adds its row */
++			seen = false;
++			wl_list_for_each(other, &menu->desktop->menu_items, link) {
++				if (other == item)
++					break;
++				if (other->folder &&
++				    strcmp(other->folder, item->folder) == 0) {
++					seen = true;
++					break;
++				}
++			}
++			if (seen)
++				continue;
++			row = &menu->rows[menu->n_rows++];
++			row->kind = ROW_FOLDER;
++			row->folder = item->folder;
++			continue;
++		}
++		row = &menu->rows[menu->n_rows++];
++		row->kind = ROW_ITEM;
++		row->item = item;
++	}
++}
++
++/* Most rows any view has (main list or a folder): the menu keeps one size */
++static int
++start_menu_max_rows(struct desktop *desktop)
++{
++	struct menu_item *item, *other;
++	int top = 0, in_folder, max;
++	bool first;
++
++	wl_list_for_each(item, &desktop->menu_items, link) {
++		if (!item->folder) {
++			top++;
++			continue;
++		}
++		first = true;
++		wl_list_for_each(other, &desktop->menu_items, link) {
++			if (other == item)
++				break;
++			if (other->folder && strcmp(other->folder, item->folder) == 0)
++				first = false;
++		}
++		if (first)
++			top++;
++	}
++	max = top;
++	wl_list_for_each(item, &desktop->menu_items, link) {
++		if (!item->folder)
++			continue;
++		in_folder = 1;	/* the Back row */
++		wl_list_for_each(other, &desktop->menu_items, link)
++			if (other->folder && strcmp(other->folder, item->folder) == 0)
++				in_folder++;
++		if (in_folder > max)
++			max = in_folder;
++	}
++	return max;
++}
++
++/* Folder icon: a tab and a body in the hexaOS blue */
++static void
++draw_folder_icon(cairo_t *cr, double x, double y, double size)
++{
++	cairo_save(cr);
++	path_rounded_rect(cr, x + 1, y + size * 0.15, size * 0.45, size * 0.3, 2);
++	cairo_set_source_rgba(cr, HEXA_BLUE, 1.0);
++	cairo_fill(cr);
++	path_rounded_rect(cr, x + 1, y + size * 0.27, size - 2, size * 0.6, 3);
++	cairo_set_source_rgba(cr, HEXA_CYAN, 1.0);
++	cairo_fill(cr);
++	cairo_restore(cr);
++}
++
++/* A ">" (right) or "<" (left) arrow centered at x, y */
++static void
++draw_chevron(cairo_t *cr, double x, double y, bool left)
++{
++	double d = left ? 3.5 : -3.5;
++
++	cairo_save(cr);
++	cairo_move_to(cr, x + d, y - 6);
++	cairo_line_to(cr, x - d, y);
++	cairo_line_to(cr, x + d, y + 6);
++	cairo_set_line_width(cr, 2);
++	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
++	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
++	cairo_set_source_rgba(cr, 1, 1, 1, 0.7);
++	cairo_stroke(cr);
++	cairo_restore(cr);
+ }
+ 
+ static void
+@@ -1675,9 +1795,13 @@ start_menu_redraw_handler(struct widget *widget, void *data)
+ 			menu->width - 2 * MENU_PAD, 1);
+ 	cairo_fill(cr);
+ 
+-	set_font(cr, 14, false);
+-	wl_list_for_each(item, &menu->desktop->menu_items, link) {
++	for (i = 0; i < menu->n_rows; i++) {
++		struct menu_row *row = &menu->rows[i];
++		double icon_y;
++		const char *label;
++
+ 		y = MENU_HEADER_HEIGHT + i * MENU_ITEM_HEIGHT;
++		icon_y = y + (MENU_ITEM_HEIGHT - ICON_SIZE) / 2.0;
+ 		if (i == menu->hover) {
+ 			path_rounded_rect(cr, MENU_PAD, y + 2,
+ 					  menu->width - 2 * MENU_PAD,
+@@ -1685,14 +1809,32 @@ start_menu_redraw_handler(struct widget *widget, void *data)
+ 			cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+ 			cairo_fill(cr);
+ 		}
+-		draw_icon(cr, item->icon, MENU_PAD + 10,
+-			  y + (MENU_ITEM_HEIGHT - ICON_SIZE) / 2.0,
+-			  ICON_SIZE, 1.0);
++		switch (row->kind) {
++		case ROW_ITEM:
++			item = row->item;
++			draw_icon(cr, item->icon, MENU_PAD + 10, icon_y,
++				  ICON_SIZE, 1.0);
++			label = item->name;
++			break;
++		case ROW_FOLDER:
++			draw_folder_icon(cr, MENU_PAD + 10, icon_y, ICON_SIZE);
++			draw_chevron(cr, menu->width - MENU_PAD - 16,
++				     y + MENU_ITEM_HEIGHT / 2.0, false);
++			label = row->folder;
++			break;
++		case ROW_BACK:
++		default:
++			draw_chevron(cr, MENU_PAD + 10 + ICON_SIZE / 2.0,
++				     y + MENU_ITEM_HEIGHT / 2.0, true);
++			label = row->folder;
++			break;
++		}
++		set_font(cr, 14, row->kind == ROW_BACK);
+ 		cairo_set_source_rgba(cr, 1, 1, 1, 0.92);
+-		show_text_fit(cr, item->name, MENU_PAD + 10 + ICON_SIZE + 12,
++		show_text_fit(cr, label, MENU_PAD + 10 + ICON_SIZE + 12,
+ 			      y + MENU_ITEM_HEIGHT / 2.0 + 5,
+-			      menu->width - 3 * MENU_PAD - ICON_SIZE - 22);
+-		i++;
++			      menu->width - 3 * MENU_PAD - ICON_SIZE - 22 -
++			      (row->kind == ROW_FOLDER ? 16 : 0));
+ 	}
+ 
+ 	cairo_destroy(cr);
+@@ -1734,12 +1876,28 @@ start_menu_leave_handler(struct widget *widget, struct input *input,
+ static void
+ start_menu_activate(struct start_menu *menu, int index)
+ {
+-	struct menu_item *item = menu_item_at_index(menu->desktop, index);
++	struct menu_row *row;
++	char *folder;
+ 
+-	if (!item)
++	if (index < 0 || index >= menu->n_rows)
+ 		return;
+-	launch_item(item);
+-	popups_close(menu->desktop);
++	row = &menu->rows[index];
++	switch (row->kind) {
++	case ROW_ITEM:
++		launch_item(row->item);
++		popups_close(menu->desktop);
++		break;
++	case ROW_FOLDER:
++	case ROW_BACK:
++		/* row->folder points into the rows being rebuilt: copy first */
++		folder = row->kind == ROW_FOLDER ? xstrdup(row->folder) : NULL;
++		free(menu->folder);
++		menu->folder = folder;
++		start_menu_build_rows(menu);
++		menu->hover = -1;
++		widget_schedule_redraw(menu->widget);
++		break;
++	}
+ }
+ 
+ static void
+@@ -1776,10 +1934,11 @@ start_menu_open(struct panel *panel)
+ 	if (desktop->shell_version < 2 || !panel->owner)
+ 		return;
+ 
+-	n = wl_list_length(&desktop->menu_items);
++	n = start_menu_max_rows(desktop);
+ 	menu = xzalloc(sizeof *menu);
+ 	menu->desktop = desktop;
+ 	menu->hover = -1;
++	start_menu_build_rows(menu);
+ 	menu->width = MENU_WIDTH;
+ 	menu->height = MENU_HEADER_HEIGHT + n * MENU_ITEM_HEIGHT + MENU_PAD;
+ 
+@@ -1821,6 +1980,8 @@ start_menu_destroy(struct desktop *desktop)
+ 		return;
+ 	widget_destroy(menu->widget);
+ 	window_destroy(menu->window);
++	free(menu->rows);
++	free(menu->folder);
+ 	free(menu);
+ 	desktop->menu = NULL;
+ }
+@@ -3446,7 +3607,8 @@ global_handler_remove(struct display *display, uint32_t id,
+ 
+ static void
+ add_menu_item(struct desktop *desktop, const char *icon, const char *path,
+-	      const char *name, const char *app_id, bool pinned)
++	      const char *name, const char *app_id, const char *folder,
++	      bool pinned)
+ {
+ 	struct menu_item *item;
+ 	char *exec;
+@@ -3454,6 +3616,7 @@ add_menu_item(struct desktop *desktop, const char *icon, const char *path,
+ 	item = xzalloc(sizeof *item);
+ 	item->name = xstrdup(name);
+ 	item->app_id = app_id ? xstrdup(app_id) : NULL;
++	item->folder = folder && *folder ? xstrdup(folder) : NULL;
+ 	item->icon = load_icon_or_fallback(icon);
+ 	item->pinned = pinned;
+ 
+@@ -3470,12 +3633,13 @@ add_menu_item(struct desktop *desktop, const char *icon, const char *path,
+ }
+ 
+ /* Every [launcher] goes to the Start menu; "pinned=true" also puts it on
+- * the taskbar, "app-id=" gives its icon to windows with that app id. */
++ * the taskbar, "app-id=" gives its icon to windows with that app id and
++ * "folder=NAME" puts it in a folder of the Start menu (e.g. Apps). */
+ static void
+ load_menu_items(struct desktop *desktop)
+ {
+ 	struct weston_config_section *s;
+-	char *icon, *path, *displayname, *app_id;
++	char *icon, *path, *displayname, *app_id, *folder;
+ 	const char *name;
+ 	bool pinned;
+ 
+@@ -3488,6 +3652,7 @@ load_menu_items(struct desktop *desktop)
+ 		weston_config_section_get_string(s, "path", &path, NULL);
+ 		weston_config_section_get_string(s, "displayname", &displayname, NULL);
+ 		weston_config_section_get_string(s, "app-id", &app_id, NULL);
++		weston_config_section_get_string(s, "folder", &folder, NULL);
+ 		weston_config_section_get_bool(s, "pinned", &pinned, false);
+ 
+ 		if (icon != NULL && path != NULL) {
+@@ -3497,7 +3662,7 @@ load_menu_items(struct desktop *desktop)
+ 				free(copy);
+ 			}
+ 			add_menu_item(desktop, icon, path, displayname,
+-				      app_id, pinned);
++				      app_id, folder, pinned);
+ 		} else {
+ 			fprintf(stderr, "invalid launcher section\n");
+ 		}
+@@ -3506,6 +3671,7 @@ load_menu_items(struct desktop *desktop)
+ 		free(path);
+ 		free(displayname);
+ 		free(app_id);
++		free(folder);
+ 	}
+ 
+ 	if (wl_list_empty(&desktop->menu_items)) {
+@@ -3513,7 +3679,7 @@ load_menu_items(struct desktop *desktop)
+ 
+ 		/* add default launcher */
+ 		add_menu_item(desktop, icon_name, BINDIR "/weston-terminal",
+-			      "Terminal", NULL, true);
++			      "Terminal", NULL, NULL, true);
+ 		free(icon_name);
+ 	}
+ }
+@@ -3529,6 +3695,7 @@ destroy_menu_items(struct desktop *desktop)
+ 		cairo_surface_destroy(item->icon);
+ 		free(item->name);
+ 		free(item->app_id);
++		free(item->folder);
+ 		free(item->exec_name);
+ 		free(item);
+ 	}

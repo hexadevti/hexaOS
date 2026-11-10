@@ -38,10 +38,13 @@ done
 
 # Desktop config: the user's choices from hexa-settings (keyboard, scale) come
 # first, because Weston uses the first section it finds with a given name.
-USER_INI=$(eval echo "~$USER_NAME")/.config/hexaos/desktop.ini
+# Start menu entries of Flatpak apps (hexaOS Store, apps/hexa-app) go last:
+# every [launcher] section counts, so they add to the system ones.
+USER_CONF=$(eval echo "~$USER_NAME")/.config/hexaos
 {
-    [ -f "$USER_INI" ] && cat "$USER_INI" && echo
+    [ -f "$USER_CONF/desktop.ini" ] && cat "$USER_CONF/desktop.ini" && echo
     cat /etc/xdg/weston/weston.ini
+    [ -f "$USER_CONF/apps.ini" ] && echo && cat "$USER_CONF/apps.ini"
 } > "$RUNTIME_DIR/weston.ini"
 chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR/weston.ini"
 

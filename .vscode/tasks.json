@@ -38,6 +38,60 @@
             "dependsOrder": "sequence",
             "dependsOn": ["hexaOS: Build", "hexaOS: Run in QEMU"],
             "problemMatcher": []
+        },
+        // hexaOS apps (Flatpak, in apps/): these run on hexaOS itself, not in WSL
+        {
+            "label": "App: Install",
+            "detail": "Builds the app, installs it for this user and adds it to the Start menu",
+            "type": "process",
+            "command": "${workspaceFolder}/apps/hexa-app",
+            "args": ["install", "${input:app}"],
+            "problemMatcher": [],
+            "presentation": { "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "App: Install and run",
+            "detail": "Same, then opens it",
+            "dependsOrder": "sequence",
+            "dependsOn": ["App: Install", "App: Run"],
+            "problemMatcher": []
+        },
+        {
+            "label": "App: Run",
+            "detail": "Opens the installed app (its messages show here)",
+            "type": "process",
+            "command": "${workspaceFolder}/apps/hexa-app",
+            "args": ["run", "${input:app}"],
+            "problemMatcher": [],
+            "presentation": { "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "App: Bundle",
+            "detail": "Makes a single .flatpak file in apps/ to install on another machine",
+            "type": "process",
+            "command": "${workspaceFolder}/apps/hexa-app",
+            "args": ["bundle", "${input:app}"],
+            "problemMatcher": [],
+            "presentation": { "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "App: Uninstall",
+            "detail": "Removes the app and its Start menu entry",
+            "type": "process",
+            "command": "${workspaceFolder}/apps/hexa-app",
+            "args": ["uninstall", "${input:app}"],
+            "problemMatcher": [],
+            "presentation": { "panel": "dedicated", "clear": true }
+        }
+    ],
+    "inputs": [
+        {
+            // New app in apps/? Add its id here.
+            "id": "app",
+            "type": "pickString",
+            "description": "Which app?",
+            "options": ["com.hexaos.Store", "com.hexaos.Hello"],
+            "default": "com.hexaos.Store"
         }
     ]
 }

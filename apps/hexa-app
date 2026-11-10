@@ -1,0 +1,74 @@
+#!/bin/sh
+# hexaOS apps: each folder here is one Flatpak app (com.hexaos.NAME/com.hexaos.NAME.yml).
+# Run on hexaOS itself (or from the VS Code tasks "App: ..."):
+#
+#   ./hexa-app install com.hexaos.Hello     build, install for this user + Start menu entry
+#   ./hexa-app run com.hexaos.Hello         run it
+#   ./hexa-app build com.hexaos.Hello       only build (into the local repo)
+#   ./hexa-app bundle com.hexaos.Hello      single file com.hexaos.Hello.flatpak for another machine
+#   ./hexa-app uninstall com.hexaos.Hello   remove it and its Start menu entry
+#   ./hexa-app list                         the apps in this folder
+#   ./hexa-app setup                        first time only: flatpak-builder + GNOME runtime
+#   ./hexa-app clean                        delete build files
+#
+# Builds go to a local Flatpak repo in .build/repo, added as the "hexaos-local"
+# remote, so "flatpak update" also picks up new builds.
+set -eu
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+cd "$(dirname "$SELF")"
+
+RUNTIME_VERSION=51
+BUILD=.build
+REPO=$BUILD/repo
+REMOTE=hexaos-local
+
+usage() { sed -n '2,16s/^# \{0,1\}//p' "$SELF"; exit 2; }
+
+need_app() {
+    [ -n "$APP" ] || usage
+    APP=${APP%/}
+    [ -f "$APP/$APP.yml" ] || { echo "No $APP/$APP.yml (see: ./hexa-app list)" >&2; exit 1; }
+}
+
+build() {
+    need_app
+    # The builder asks the host flatpak for the SDK and passes on its own
+    # XDG_DATA_HOME (~/.var/app/...), so point it at the real user installation
+    # (flatpak run --env cannot change it, so set it inside the sandbox)
+    flatpak run --command=sh org.flatpak.Builder -c \
+        'XDG_DATA_HOME="$HOME/.local/share" exec flatpak-builder "$@"' flatpak-builder \
+        --user --force-clean --ccache --disable-rofiles-fuse --state-dir="$BUILD/state" --repo="$REPO" \
+        "$BUILD/$APP" "$APP/$APP.yml"
+}
+
+CMD=${1:-}
+APP=${2:-}
+case "$CMD" in
+    list)
+        ls -d com.hexaos.*/ | tr -d / ;;
+    setup)
+        flatpak install --user --noninteractive -y flathub org.flatpak.Builder \
+            "org.gnome.Platform//$RUNTIME_VERSION" "org.gnome.Sdk//$RUNTIME_VERSION" ;;
+    build)
+        build ;;
+    install)
+        build
+        flatpak remote-add --user --if-not-exists --no-gpg-verify "$REMOTE" "$REPO"
+        flatpak install --user --noninteractive -y --reinstall "$REMOTE" "$APP"
+        ./hexa-launcher add "$APP" ;;
+    run)
+        need_app
+        exec flatpak run "$APP" ;;
+    bundle)
+        build
+        flatpak build-bundle "$REPO" "$APP.flatpak" "$APP"
+        echo "Install elsewhere with: flatpak install --user $APP.flatpak" ;;
+    uninstall)
+        need_app
+        flatpak uninstall --user --noninteractive -y "$APP"
+        ./hexa-launcher remove "$APP" ;;
+    clean)
+        rm -rf "$BUILD" .flatpak-builder ./*.flatpak ;;
+    *)
+        usage ;;
+esac
