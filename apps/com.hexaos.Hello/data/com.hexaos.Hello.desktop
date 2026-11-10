@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Hello
-Comment=Template hexaOS app
-Exec=hexa-hello
-Icon=com.hexaos.Hello
-Categories=Utility;GTK;
