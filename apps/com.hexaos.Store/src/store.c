@@ -21,6 +21,7 @@
 
 #define APP_ID		"com.hexaos.Store"
 #define FALLBACK_ICON	"/usr/share/weston/icon_window.png"
+#define MENU_FOLDER	"Apps"	/* Start menu folder of every Flatpak app */
 #define ICON_SIZE	48	/* in the lists */
 #define LAUNCHER_ICON	64	/* PNG made for the Start menu */
 #define MAX_RESULTS	80
@@ -456,7 +457,8 @@ add_launcher(const char *id, const char *fallback_name)
 	icon = launcher_icon(id);
 	g_ptr_array_add(blocks, g_strdup_printf("# app: %s\n[launcher]\ndisplayname=%s\n"
 						"icon=%s\npath=/usr/bin/flatpak run %s\n"
-						"app-id=%s\n", id, name, icon, id, id));
+						"app-id=%s\nfolder=%s\n", id, name, icon, id, id,
+						MENU_FOLDER));
 	ini_save(blocks);
 	show_restart_bar();
 	g_free(name);

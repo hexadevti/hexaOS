@@ -55,7 +55,9 @@ desktop (the Store has a button for it, or sign out).
 Weston's Start menu lists every `[launcher]` section of its config. hexa-session
 builds that config at login from `~/.config/hexaos/desktop.ini` (Settings),
 `/etc/xdg/weston/weston.ini` (system apps) and `~/.config/hexaos/apps.ini`
-(Flatpak apps). `apps.ini` holds one block per app, marked with `app-id=`:
+(Flatpak apps). `apps.ini` holds one block per app, marked with `app-id=`;
+`folder=Apps` puts them all in the **Apps** folder of the Start menu
+(patches/weston/0003; older images ignore the key and list them directly):
 
 ```ini
 # app: org.vinegarhq.Sober
@@ -64,6 +66,7 @@ displayname=Sober
 icon=/home/hexa/.config/hexaos/icons/org.vinegarhq.Sober.png
 path=/usr/bin/flatpak run org.vinegarhq.Sober
 app-id=org.vinegarhq.Sober
+folder=Apps
 ```
 
 The Store and `hexa-launcher` write it; icons must be PNG (the Store makes a

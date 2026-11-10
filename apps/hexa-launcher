@@ -11,6 +11,7 @@ CONF="$HOME/.config/hexaos"
 INI="$CONF/apps.ini"
 EXPORTS="$HOME/.local/share/flatpak/exports/share"
 FALLBACK_ICON=/usr/share/weston/icon_window.png
+FOLDER=Apps	# Start menu folder of every Flatpak app
 
 cmd=${1:-}
 id=${2:-}
@@ -57,6 +58,7 @@ displayname=$name
 icon=$icon
 path=/usr/bin/flatpak run $id
 app-id=$id
+folder=$FOLDER
 
 EOF
-echo "Start menu: added $name (shows up after the desktop restarts)"
+echo "Start menu: added $name to $FOLDER (shows up after the desktop restarts)"
