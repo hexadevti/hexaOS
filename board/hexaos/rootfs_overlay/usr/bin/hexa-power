@@ -2,6 +2,14 @@
 # hexaOS power menu: restart or shut down the computer, or restart the desktop.
 # Opened from the Start menu (Power), or by typing "hexa-power".
 # Restart and shut down need no password (/etc/sudoers.d/power).
+#
+# On the desktop it opens the power window (hexa-power-gui); in text mode, or
+# with "hexa-power --text", it shows this text menu.
+
+GUI=/usr/libexec/hexa-power-gui
+if [ "$1" != "--text" ] && [ -n "$WAYLAND_DISPLAY" ] && [ -x "$GUI" ]; then
+    exec "$GUI"
+fi
 
 infocmp >/dev/null 2>&1 || export TERM=xterm-256color
 

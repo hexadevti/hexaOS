@@ -1,0 +1,8 @@
+config BR2_PACKAGE_HEXA_FILES
+	bool "hexa-files"
+	depends on BR2_PACKAGE_LIBGTK3
+	help
+	  The hexaOS file manager, laid out like Windows Explorer:
+	  places and drives on the left, back/forward/up, an address
+	  bar, search, large icons or a details list, copy/cut/paste,
+	  rename, Trash, properties and "open with".

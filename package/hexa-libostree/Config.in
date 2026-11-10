@@ -1,0 +1,23 @@
+config BR2_PACKAGE_HEXA_LIBOSTREE
+	bool "hexa-libostree"
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on BR2_USE_WCHAR # libglib2
+	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2
+	depends on BR2_USE_MMU # e2fsprogs, libglib2, libgpgme
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS # libgpgme
+	select BR2_PACKAGE_E2FSPROGS
+	select BR2_PACKAGE_LIBCURL # downloads (HTTP)
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBGPG_ERROR
+	select BR2_PACKAGE_LIBGPGME
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_LIBMOUNT
+	select BR2_PACKAGE_XZ
+	help
+	  libostree (the storage of Flatpak) without composefs.
+
+	  Buildroot's libostree package needs kernel headers 5.8 or
+	  newer, only because of composefs (LOOP_CONFIGURE); the hexaOS
+	  toolchain has 5.4 headers, and Flatpak does not use composefs.
+
+	  https://ostreedev.github.io/ostree/

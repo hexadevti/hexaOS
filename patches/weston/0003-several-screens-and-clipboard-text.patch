@@ -1,0 +1,401 @@
+desktop-shell, clipboard: maximize/restore on the right screen; paste text from any app
+
+Several screens:
+- Maximizing a minimized window (taskbar menu) put it on the primary
+  screen: a minimized view is on no shown layer, so surface->output is
+  NULL and Weston fell back to the default output. The window's screen
+  now comes from its position and size, which also works when minimized.
+- Restoring a window that opened maximized (no saved position) put it
+  on the screen under the pointer, e.g. the taskbar used to restore it.
+  It is now centered on the screen it was maximized on, as is a window
+  whose saved place is on no screen any more.
+- Taskbar "Maximize" brings the window back from minimized before
+  maximizing it, not after.
+
+Clipboard: the clipboard manager kept and offered only the first MIME
+type of a copy. Chromium/Electron programs (VS Code) list text/html or
+their own types first, so once the copy was taken over, a terminal
+(foot), asking for plain text, had nothing to paste. It now keeps plain
+text (UTF-8 when offered) and offers it under the usual text names, and
+frees all the type names it keeps.
+---
+ desktop-shell/shell.c | 106 ++++++++++++++++++++++++++--
+ libweston/clipboard.c | 157 ++++++++++++++++++++++++++++++++++--------
+ 2 files changed, 231 insertions(+), 32 deletions(-)
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index 22d0f28..34ce2ad 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -1776,19 +1776,113 @@ unset_fullscreen(struct shell_surface *shsurf)
+ 	}
+ }
+ 
++/*
++ * hexaOS, several screens: the screen that holds most of a window, from its
++ * position and size. Unlike surface->output this also works while the window
++ * is minimized (its view is then on no shown layer, so libweston gives it no
++ * output, and Weston used to pick the primary screen). NULL when the window is
++ * on no screen at all.
++ */
++static struct weston_output *
++shell_surface_overlapping_output(struct shell_surface *shsurf)
++{
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_output *output, *best = NULL;
++	struct weston_geometry geo;
++	struct weston_coord_global pos;
++	int64_t area, best_area = 0;
++	int32_t x1, y1, x2, y2;
++
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	if (geo.width <= 0 || geo.height <= 0) {
++		geo.x = 0;
++		geo.y = 0;
++		geo.width = surface->width;
++		geo.height = surface->height;
++	}
++	pos = weston_view_get_pos_offset_global(shsurf->view);
++
++	wl_list_for_each(output, &surface->compositor->output_list, link) {
++		if (output->destroying)
++			continue;
++		x1 = MAX((int32_t) pos.c.x + geo.x, (int32_t) output->pos.c.x);
++		y1 = MAX((int32_t) pos.c.y + geo.y, (int32_t) output->pos.c.y);
++		x2 = MIN((int32_t) pos.c.x + geo.x + geo.width,
++			 (int32_t) output->pos.c.x + output->width);
++		y2 = MIN((int32_t) pos.c.y + geo.y + geo.height,
++			 (int32_t) output->pos.c.y + output->height);
++		if (x2 <= x1 || y2 <= y1)
++			continue;
++		area = (int64_t) (x2 - x1) * (y2 - y1);
++		if (area > best_area) {
++			best = output;
++			best_area = area;
++		}
++	}
++	return best;
++}
++
++/* The screen a window belongs to: where most of it is, else the screen it was
++ * last maximized or full screen on, else the focused or default one */
++static struct weston_output *
++shell_surface_find_output(struct shell_surface *shsurf)
++{
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_output *output = shell_surface_overlapping_output(shsurf);
++
++	if (!output)
++		output = shsurf->output;
++	if (!output)
++		output = weston_shell_utils_get_focused_output(surface->compositor);
++	if (!output)
++		output = weston_shell_utils_get_default_output(surface->compositor);
++	return output;
++}
++
++/* Centers a window in the work area of OUTPUT */
++static void
++shell_surface_center_on_output(struct shell_surface *shsurf,
++			       struct weston_output *output)
++{
++	pixman_rectangle32_t area;
++	struct weston_geometry geo;
++	struct weston_coord_global pos;
++	struct weston_coord_surface offset;
++	int32_t x, y;
++
++	get_output_work_area(shsurf->shell, output, &area);
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	x = area.x + MAX(0, ((int32_t) area.width - geo.width) / 2);
++	y = area.y + MAX(0, ((int32_t) area.height - geo.height) / 2);
++	pos.c = weston_coord(x, y);
++	offset = weston_coord_surface(-geo.x, -geo.y, shsurf->view->surface);
++	weston_view_set_position_with_offset(shsurf->view, pos, offset);
++}
++
+ static void
+ unset_maximized(struct shell_surface *shsurf)
+ {
+ 	struct weston_surface *surface =
+ 		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	/* the screen it was maximized on */
++	struct weston_output *max_output = shsurf->output;
+ 
+ 	/* undo all maximized things here */
+ 	shell_surface_set_output(shsurf,
+ 			weston_shell_utils_get_default_output(surface->compositor));
+ 
++	/* hexaOS: go back to where the window was before; if it opened
++	 * maximized (no such place), or that place is on no screen any more,
++	 * center it on the screen it was maximized on, not on the screen
++	 * under the pointer (e.g. the taskbar used to restore it). */
+ 	if (shsurf->saved_position_valid)
+ 		weston_view_set_position(shsurf->view, shsurf->saved_pos);
+-	else
++	if (max_output && (!shsurf->saved_position_valid ||
++			   !shell_surface_overlapping_output(shsurf)))
++		shell_surface_center_on_output(shsurf, max_output);
++	else if (!shsurf->saved_position_valid)
+ 		weston_view_set_initial_position(shsurf->view, shsurf->shell);
+ 	shsurf->saved_position_valid = false;
+ 
+@@ -2627,8 +2721,8 @@ set_maximized(struct shell_surface *shsurf, bool maximized)
+ 
+ 		if (!weston_surface_is_mapped(surface))
+ 			output = weston_shell_utils_get_focused_output(surface->compositor);
+-		else
+-			output = surface->output;
++		else	/* hexaOS: its own screen, even when minimized */
++			output = shell_surface_find_output(shsurf);
+ 
+ 		shell_surface_set_output(shsurf, output);
+ 
+@@ -3346,9 +3440,11 @@ desktop_shell_window_set_maximized(struct wl_client *client,
+ 	if (!shsurf || shell->locked)
+ 		return;
+ 
+-	/* the client resizes and commits; the taskbar hears about it then */
+-	set_maximized(shsurf, maximized != 0);
++	/* Bring it back from minimized first (on its own screen), then
++	 * maximize or restore it there. The client resizes and commits; the
++	 * taskbar hears about it then. */
+ 	desktop_shell_window_activate(client, resource, id);
++	set_maximized(shsurf, maximized != 0);
+ }
+ 
+ /* Start menu popup: a surface shown above windows and the panel */
+diff --git a/libweston/clipboard.c b/libweston/clipboard.c
+index a82d8fe..3d649db 100644
+--- a/libweston/clipboard.c
++++ b/libweston/clipboard.c
+@@ -56,11 +56,72 @@ struct clipboard {
+ 
+ static void clipboard_client_create(struct clipboard_source *source, int fd);
+ 
++/*
++ * hexaOS: the clipboard keeps a copy of what was copied, so it can still be
++ * pasted after the program it came from closes. Weston kept the program's
++ * first MIME type only, and served nothing else; Chromium/Electron programs
++ * (VS Code...) list text/html or their own types first, so terminals (foot),
++ * which ask for plain text, got nothing to paste. Now the plain text is kept,
++ * in UTF-8 when offered, and served under the usual names for text.
++ */
++static const char *const text_types[] = {	/* best first */
++	"text/plain;charset=utf-8",
++	"UTF8_STRING",
++	"text/plain",
++	"STRING",
++	"TEXT",
++};
++
++/* Same text under these names, when the kept copy is UTF-8 */
++static const char *const utf8_aliases[] = {
++	"text/plain;charset=utf-8",
++	"UTF8_STRING",
++	"text/plain",
++};
++
++static bool
++mime_list_has(struct wl_array *types, const char *type)
++{
++	char **s;
++
++	wl_array_for_each(s, types) {
++		if (strcmp(*s, type) == 0)
++			return true;
++	}
++	return false;
++}
++
++static bool
++mime_list_add(struct wl_array *types, const char *type)
++{
++	char **s;
++
++	if (mime_list_has(types, type))
++		return true;
++	s = wl_array_add(types, sizeof *s);
++	if (s == NULL)
++		return false;
++	*s = strdup(type);
++	if (*s == NULL) {
++		types->size -= sizeof *s;
++		return false;
++	}
++	return true;
++}
++
+ static void
+-clipboard_source_unref(struct clipboard_source *source)
++mime_list_release(struct wl_array *types)
+ {
+ 	char **s;
+ 
++	wl_array_for_each(s, types)
++		free(*s);
++	wl_array_release(types);
++}
++
++static void
++clipboard_source_unref(struct clipboard_source *source)
++{
+ 	source->refcount--;
+ 	if (source->refcount > 0)
+ 		return;
+@@ -71,9 +132,7 @@ clipboard_source_unref(struct clipboard_source *source)
+ 	}
+ 	wl_signal_emit(&source->base.destroy_signal,
+ 		       &source->base);
+-	s = source->base.mime_types.data;
+-	free(*s);
+-	wl_array_release(&source->base.mime_types);
++	mime_list_release(&source->base.mime_types);
+ 	wl_array_release(&source->contents);
+ 	free(source);
+ }
+@@ -120,10 +179,9 @@ clipboard_source_send(struct weston_data_source *base,
+ {
+ 	struct clipboard_source *source =
+ 		container_of(base, struct clipboard_source, base);
+-	char **s;
+ 
+-	s = source->base.mime_types.data;
+-	if (strcmp(mime_type, s[0]) == 0)
++	/* every type offered holds the same kept copy */
++	if (mime_list_has(&source->base.mime_types, mime_type))
+ 		clipboard_client_create(source, fd);
+ 	else
+ 		close(fd);
+@@ -134,14 +192,66 @@ clipboard_source_cancel(struct weston_data_source *source)
+ {
+ }
+ 
++static bool
++is_text_type(const char *type)
++{
++	size_t i;
++
++	for (i = 0; i < ARRAY_LENGTH(text_types); i++) {
++		if (strcmp(type, text_types[i]) == 0)
++			return true;
++	}
++	return false;
++}
++
++/* The type to keep a copy of: the best text type offered, else the first */
++static const char *
++clipboard_pick_type(struct wl_array *offered)
++{
++	size_t i;
++
++	for (i = 0; i < ARRAY_LENGTH(text_types); i++) {
++		if (mime_list_has(offered, text_types[i]))
++			return text_types[i];
++	}
++	return *(const char **) offered->data;
++}
++
++/* Types our copy is offered as: the kept one, the program's other names for
++ * plain text, and the usual UTF-8 names when the copy is UTF-8 */
++static bool
++clipboard_fill_types(struct wl_array *types, struct wl_array *offered,
++		     const char *kept)
++{
++	char **s;
++	size_t i;
++
++	if (!mime_list_add(types, kept))
++		return false;
++	if (!is_text_type(kept))
++		return true;
++
++	wl_array_for_each(s, offered) {
++		if (is_text_type(*s) && !mime_list_add(types, *s))
++			return false;
++	}
++	if (strcmp(kept, "text/plain;charset=utf-8") == 0 ||
++	    strcmp(kept, "UTF8_STRING") == 0) {
++		for (i = 0; i < ARRAY_LENGTH(utf8_aliases); i++) {
++			if (!mime_list_add(types, utf8_aliases[i]))
++				return false;
++		}
++	}
++	return true;
++}
++
+ static struct clipboard_source *
+-clipboard_source_create(struct clipboard *clipboard,
++clipboard_source_create(struct clipboard *clipboard, struct wl_array *offered,
+ 			const char *mime_type, uint32_t serial, int fd)
+ {
+ 	struct wl_display *display = clipboard->seat->compositor->wl_display;
+ 	struct wl_event_loop *loop = wl_display_get_event_loop(display);
+ 	struct clipboard_source *source;
+-	char **s;
+ 
+ 	source = zalloc(sizeof *source);
+ 	if (source == NULL)
+@@ -159,25 +269,18 @@ clipboard_source_create(struct clipboard *clipboard,
+ 	source->serial = serial;
+ 	source->fd = fd;
+ 
+-	s = wl_array_add(&source->base.mime_types, sizeof *s);
+-	if (s == NULL)
+-		goto err_add;
+-	*s = strdup(mime_type);
+-	if (*s == NULL)
+-		goto err_strdup;
++	if (!clipboard_fill_types(&source->base.mime_types, offered, mime_type))
++		goto err;
+ 	source->event_source =
+ 		wl_event_loop_add_fd(loop, fd, WL_EVENT_READABLE,
+ 				     clipboard_source_data, source);
+ 	if (source->event_source == NULL)
+-		goto err_source;
++		goto err;
+ 
+ 	return source;
+ 
+- err_source:
+-	free(*s);
+- err_strdup:
+-	wl_array_release(&source->base.mime_types);
+- err_add:
++ err:
++	mime_list_release(&source->base.mime_types);
+ 	free(source);
+ 
+ 	return NULL;
+@@ -239,7 +342,7 @@ clipboard_set_selection(struct wl_listener *listener, void *data)
+ 		container_of(listener, struct clipboard, selection_listener);
+ 	struct weston_seat *seat = data;
+ 	struct weston_data_source *source = seat->selection_data_source;
+-	const char **mime_types;
++	const char *kept;
+ 	int p[2];
+ 
+ 	if (source == NULL) {
+@@ -258,15 +361,15 @@ clipboard_set_selection(struct wl_listener *listener, void *data)
+ 
+ 	clipboard->source = NULL;
+ 
+-	mime_types = source->mime_types.data;
+-
+-	if (!mime_types || pipe2(p, O_CLOEXEC) == -1)
++	if (source->mime_types.size < sizeof(char *) ||
++	    pipe2(p, O_CLOEXEC) == -1)
+ 		return;
+ 
+-	source->send(source, mime_types[0], p[1]);
++	kept = clipboard_pick_type(&source->mime_types);
++	source->send(source, kept, p[1]);
+ 
+ 	clipboard->source =
+-		clipboard_source_create(clipboard, mime_types[0],
++		clipboard_source_create(clipboard, &source->mime_types, kept,
+ 					seat->selection_serial, p[0]);
+ 	if (clipboard->source == NULL) {
+ 		close(p[0]);

@@ -1,9 +1,19 @@
 #!/bin/sh
 # Minimal xdg-open (hexaOS has no desktop environment): VS Code opens the
 # GitHub/Microsoft login page with it, and Firefox sends the vscode:// reply back.
-# vscode:// links -> VS Code; web pages and everything else -> Firefox.
+# vscode:// links -> VS Code; folders -> Files (hexa-files); other local files
+# -> their default app through Files' rules; web pages -> Firefox.
 [ -n "$1" ] || { echo "usage: xdg-open URL|FILE" >&2; exit 1; }
-case "$1" in
-    vscode:*|vscode-insiders:*) exec /usr/bin/code --open-url "$1" ;;
-    *) /usr/bin/firefox "$1" >/dev/null 2>&1 & ;;
+target=$1
+case "$target" in
+    vscode:*|vscode-insiders:*) exec /usr/bin/code --open-url "$target" ;;
+    file://*)
+        # file:///path (spaces and such come %-encoded)
+        target=$(printf '%s' "${target#file://}" | sed 's/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\x\1/g')
+        target=$(printf '%b' "$target") ;;
 esac
+if [ -d "$target" ]; then
+    /usr/bin/hexa-files "$target" >/dev/null 2>&1 &
+else
+    /usr/bin/firefox "$target" >/dev/null 2>&1 &
+fi

@@ -17,6 +17,11 @@ mkdir -p "$RUNTIME_DIR"
 chown "$USER_NAME:$USER_NAME" "$RUNTIME_DIR"
 chmod 700 "$RUNTIME_DIR"
 
+# X11 socket folder for Xwayland (xwayland=true in weston.ini): Weston, as the
+# user, cannot create it in /tmp, and without it Weston exits at start.
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+
 # Wait for seatd (grants access to the display, keyboard and mouse)
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -S /run/seatd.sock ] && break
@@ -54,6 +59,7 @@ chmod 755 "$RUNTIME_DIR/session.sh"
 su "$USER_NAME" -c "cd ~ && \
     LANG=en_US.UTF-8 XDG_RUNTIME_DIR=$RUNTIME_DIR \
     XDG_SESSION_TYPE=wayland MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=wayland \
+    XDG_DATA_DIRS=\$HOME/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share:/usr/share \
     exec dbus-run-session -- $RUNTIME_DIR/session.sh"
 
 # If Weston exits/fails, wait a little before init restarts this script

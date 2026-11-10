@@ -1,0 +1,8 @@
+config BR2_PACKAGE_HEXA_LIBFYAML
+	bool "hexa-libfyaml"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  Fully featured YAML 1.2 parser library. Needed by AppStream
+	  (and so by Flatpak).
+
+	  https://github.com/pantoniou/libfyaml

@@ -1,0 +1,24 @@
+%!PS
+% 24x24 panel icon: games (Steam): a gamepad
+(common.ps) run
+gsave
+  12 12 11.5 hexpath clip
+  << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 24 24]
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [blue] /C1 [cyan] /N 1 >>
+     /Extend [true true] >> shfill
+grestore
+% Gamepad body: a bar with two round grips
+bg setrgbcolor
+newpath 8 12 3.6 0 360 arc fill
+newpath 16 12 3.6 0 360 arc fill
+newpath 7.5 10 moveto 16.5 10 lineto 16.5 15.6 lineto 7.5 15.6 lineto closepath fill
+newpath 6.2 8.2 2.4 0 360 arc fill
+newpath 17.8 8.2 2.4 0 360 arc fill
+% D-pad (left) and buttons (right)
+cyan setrgbcolor
+1.1 setlinewidth 0 setlinecap
+newpath 6 12.6 moveto 9.4 12.6 lineto stroke
+newpath 7.7 10.9 moveto 7.7 14.3 lineto stroke
+newpath 16.9 13.6 0.75 0 360 arc fill
+newpath 15.4 12.1 0.75 0 360 arc fill
+showpage

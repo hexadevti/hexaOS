@@ -3,13 +3,16 @@
 # Start menu, or by typing "hexa-setup").
 # Safe to run again at any time: each step only changes what is not set yet.
 #
-# The values (Wi-Fi network and password...) come from /etc/hexaos/setup.conf,
+# Steps: join the Wi-Fi network, check the internet (reach Google), set the
+# screen scale (e.g. 200%).
+#
+# The values (Wi-Fi network and password, scale...) come from /etc/hexaos/setup.conf,
 # which only root can read, so this asks for your password (sudo) first.
 #
 # Adding a step: write a step_NAME function and add NAME to STEPS.
 
 CONF=/etc/hexaos/setup.conf
-STEPS=(wifi)
+STEPS=(wifi google scale)
 
 # shellcheck source=/usr/lib/hexaos/wifi.sh
 . /usr/lib/hexaos/wifi.sh
@@ -89,6 +92,78 @@ step_wifi() {
     fail "Could not connect to \"$WIFI_SSID\"."
     echo
     hx_wifi_diagnose "$W" "$out" "$mark" | sed 's/^/    /'
+}
+
+# --------------------------------------------------------------- internet
+
+step_google() {
+    title "Internet (Google)"
+    local code err try
+    for try in 1 2 3 4 5; do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 https://www.google.com/generate_204)
+        err=$?
+        if [ "$code" = 204 ]; then
+            ok "Connected to the internet: google.com answered."
+            return
+        fi
+        note "google.com did not answer yet (attempt $try of 5)..."
+        sleep 3
+    done
+    if [ "$err" = 6 ]; then   # curl: could not resolve host
+        fail "Could not find google.com: no internet, or DNS does not work (check Wi-Fi above)."
+    elif [ "$code" = 000 ]; then
+        fail "Could not reach google.com (no internet connection, or a firewall blocks it)."
+    else
+        fail "google.com answered $code instead of 204: the network may need a sign-in page (hotel, airport): open Firefox."
+    fi
+}
+
+# ------------------------------------------------------------------ scale
+
+step_scale() {
+    title "Screen scale"
+    local user home ini before c o list=
+    if [ -z "$SCALE" ]; then
+        note "SCALE is not set in $CONF: skipped."
+        return
+    fi
+    case $SCALE in
+        1|2|3) ;;
+        *) fail "SCALE in $CONF must be 1, 2 or 3 (100%, 200%, 300%); it is \"$SCALE\"."; return ;;
+    esac
+    # The settings belong to whoever opened Setup (through sudo), not to root
+    user=${SUDO_USER:-hexa}
+    [ "$user" = root ] && user=hexa
+    home=$(awk -F: -v u="$user" '$1 == u {print $6}' /etc/passwd)
+    if [ -z "$home" ] || [ ! -d "$home" ]; then
+        fail "User \"$user\" was not found."
+        return
+    fi
+    ini=$home/.config/hexaos/desktop.ini
+    before=$(cat "$ini" 2>/dev/null)
+
+    # Every connected screen (eDP-1, HDMI-A-1...), as the desktop names them
+    for c in /sys/class/drm/card*-*; do
+        [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
+        c=${c##*/}
+        o=${c#card*-}
+        # Same as choosing it in Settings > Display
+        if ! sudo -u "$user" HOME="$home" hexa-settings --set "output $o" scale "$SCALE"; then
+            fail "Could not save the scale for $o."
+            return
+        fi
+        list="$list $o"
+    done
+    if [ -z "$list" ]; then
+        fail "No connected screen was found."
+        return
+    fi
+    if [ "$(cat "$ini" 2>/dev/null)" = "$before" ]; then
+        ok "Scale already $((SCALE * 100))% on:$list."
+    else
+        ok "Scale set to $((SCALE * 100))% on:$list."
+        note "It takes effect when the desktop restarts (Start menu > Power > Restart desktop)."
+    fi
 }
 
 # ------------------------------------------------------------------- main

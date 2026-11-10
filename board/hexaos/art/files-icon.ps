@@ -1,0 +1,18 @@
+%!PS
+% 24x24 panel icon: Files (the file manager): a folder
+(common.ps) run
+gsave
+  12 12 11.5 hexpath clip
+  << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 24 24]
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [blue] /C1 [cyan] /N 1 >>
+     /Extend [true true] >> shfill
+grestore
+% Folder: back with a tab, then the front flap
+bg setrgbcolor
+newpath 5.5 7 moveto 5.5 16.5 lineto 10 16.5 lineto 11.2 15.2 lineto
+  18.5 15.2 lineto 18.5 7 lineto closepath fill
+cyan setrgbcolor
+newpath 5.5 7 moveto 18.5 7 lineto 18.5 13.4 lineto 5.5 13.4 lineto closepath fill
+bg setrgbcolor
+newpath 7 8.6 moveto 17 8.6 lineto 0.9 setlinewidth stroke
+showpage

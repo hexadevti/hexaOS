@@ -1,0 +1,31 @@
+config BR2_PACKAGE_HEXA_FLATPAK
+	bool "hexa-flatpak"
+	depends on BR2_TOOLCHAIN_USES_GLIBC # libostree, sys/xattr.h
+	depends on BR2_USE_WCHAR # libglib2
+	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2
+	depends on BR2_USE_MMU # bubblewrap, libglib2
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS # libgpgme
+	select BR2_PACKAGE_HEXA_APPSTREAM
+	select BR2_PACKAGE_BUBBLEWRAP
+	select BR2_PACKAGE_XDG_DBUS_PROXY
+	select BR2_PACKAGE_HEXA_LIBOSTREE
+	select BR2_PACKAGE_LIBGPGME
+	select BR2_PACKAGE_LIBARCHIVE
+	select BR2_PACKAGE_LIBCAP
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBFUSE3
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBSECCOMP
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_GDK_PIXBUF
+	select BR2_PACKAGE_ZSTD
+	help
+	  Flatpak: installs and runs sandboxed Linux apps from Flathub
+	  (e.g. Steam). Each app brings its own libraries, including the
+	  32-bit ones Steam needs.
+
+	  Built without the system helper (polkit): install apps per user
+	  (flatpak install --user), or as root for everyone.
+
+	  https://flatpak.org

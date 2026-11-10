@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Browse and manage your files
+Exec=hexa-files %U
+Icon=/usr/share/hexaos/files.png
+Terminal=false
+Categories=System;FileManager;
+MimeType=inode/directory;
+StartupWMClass=org.hexaos.Files

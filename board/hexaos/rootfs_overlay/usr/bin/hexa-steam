@@ -1,0 +1,56 @@
+#!/bin/sh
+# Steam (Start menu): the Flathub version, which brings its own 32-bit
+# libraries and graphics drivers. The first time, it installs Steam for this
+# user in a terminal window (about 1 GB), then starts it.
+
+APP=com.valvesoftware.Steam
+
+# Steam is an X11 program (it runs on Xwayland, which Weston starts with
+# xwayland=true and announces in DISPLAY). Steam checks that the D-Bus session
+# knows DISPLAY too, and the session bus started before the desktop did.
+if [ -n "$DISPLAY" ]; then
+    dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY \
+        XDG_RUNTIME_DIR XDG_SESSION_TYPE 2>/dev/null
+fi
+
+# Steam's messages, to see why it did not start: ~/.cache/hexa-steam.log
+LOG=$HOME/.cache/hexa-steam.log
+mkdir -p "${LOG%/*}"
+
+if flatpak info --user "$APP" >/dev/null 2>&1; then
+    # Opened from the menu: messages to the log (in a terminal: on screen)
+    case $(readlink /proc/$$/fd/1 2>/dev/null) in
+        /dev/pts/*) exec flatpak run "$APP" "$@" ;;
+        *) exec flatpak run "$APP" "$@" >"$LOG" 2>&1 ;;
+    esac
+fi
+
+# Not installed yet: show the progress in a terminal window. Opened from the
+# menu, the output is the desktop's console (tty1, invisible) rather than a
+# terminal window (/dev/pts/N), so "-t 1" is not enough to tell.
+case $(readlink /proc/$$/fd/1 2>/dev/null) in
+    /dev/pts/*) ;;
+    *)
+        if [ -z "$HEXA_STEAM_TERMINAL" ] && [ -n "$WAYLAND_DISPLAY" ]; then
+            exec env HEXA_STEAM_TERMINAL=1 foot --app-id=hexa-steam --title="Installing Steam" "$0" "$@"
+        fi
+        ;;
+esac
+
+echo "Installing Steam from Flathub. This downloads about 1 GB and takes a while."
+echo
+if flatpak remote-add --user --if-not-exists flathub /etc/flatpak/remotes.d/flathub.flatpakrepo &&
+   flatpak install --user --noninteractive flathub "$APP"; then
+    echo
+    echo "Steam is installed. Starting it (the first start takes a few minutes:"
+    echo "Steam updates itself first). Its messages go to $LOG"
+    # Started apart from this terminal, so closing the window does not end Steam
+    setsid flatpak run "$APP" "$@" >"$LOG" 2>&1 &
+    sleep 5
+else
+    echo
+    echo "Installing Steam failed (no internet? not enough disk space?)."
+    echo "Press Enter to close."
+    read -r _
+    exit 1
+fi

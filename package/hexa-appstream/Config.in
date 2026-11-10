@@ -1,0 +1,17 @@
+config BR2_PACKAGE_HEXA_APPSTREAM
+	bool "hexa-appstream"
+	depends on BR2_USE_WCHAR # libglib2
+	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2
+	depends on BR2_USE_MMU # libglib2
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_LIBXMLB
+	select BR2_PACKAGE_ZSTD
+	select BR2_PACKAGE_HEXA_LIBFYAML
+	help
+	  AppStream library: reads the app catalog metadata of software
+	  stores. Needed by Flatpak. Only the library is built (no
+	  appstreamcli tool, translations or docs).
+
+	  https://www.freedesktop.org/wiki/Distributions/AppStream/

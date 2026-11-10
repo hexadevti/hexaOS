@@ -1,0 +1,552 @@
+desktop-shell: snap windows to the top of a screen; fixes for several screens
+
+Window snapping, like Windows:
+- Dragging a window to the top edge of a screen shows a translucent
+  preview of that screen's work area; dropping it there maximizes the
+  window on that screen. Restoring it later goes back to where the drag
+  started (when that was on the same screen).
+- Dragging a maximized window (its title bar, or Super + drag) restores
+  it once the pointer has moved a few pixels, and the restored window
+  stays under the pointer at the same place of its title bar, so the
+  drag goes on. A click or double click does not restore it.
+
+Several screens:
+- A new window bigger than the work area of its screen (e.g. it
+  remembered its size from a bigger or less scaled screen) is asked to
+  fit the screen and is centered once its new size arrives. New windows
+  are also placed by their visible size (without client-side shadows),
+  inside the work area.
+- desktop-shell client: the taskbar and wallpaper of a screen could stay
+  at scale 1 on a scaled screen: the screen's scale event may come
+  before they are created, and was then never applied. A scale change
+  now also redraws them, instead of leaving the old buffer with the new
+  scale.
+
+diff -ruN a/clients/desktop-shell.c b/clients/desktop-shell.c
+--- a/clients/desktop-shell.c
++++ b/clients/desktop-shell.c
+@@ -3296,12 +3296,29 @@
+                     int32_t scale)
+ {
+ 	struct output *output = data;
++	struct window *windows[2];
++	struct rectangle alloc;
++	int i;
+ 
+ 	output->scale = scale;
+-	if (output->panel)
+-		window_set_buffer_scale(output->panel->window, scale);
+-	if (output->background)
+-		window_set_buffer_scale(output->background->window, scale);
++	windows[0] = output->panel ? output->panel->window : NULL;
++	windows[1] = output->background ? output->background->window : NULL;
++
++	/* hexaOS: also draw them again at the new scale. Only setting the
++	 * scale left the old buffer on screen with the new scale (a taskbar
++	 * or wallpaper of the wrong size) until something redrew it, which
++	 * for the wallpaper is never. */
++	for (i = 0; i < 2; i++) {
++		if (!windows[i] ||
++		    window_get_buffer_scale(windows[i]) == (uint32_t) scale)
++			continue;
++		window_set_buffer_scale(windows[i], scale);
++		window_get_allocation(windows[i], &alloc);
++		if (alloc.width > 0 && alloc.height > 0)
++			window_schedule_resize(windows[i], alloc.width, alloc.height);
++		else
++			window_schedule_redraw(windows[i]);
++	}
+ }
+ 
+ static const struct wl_output_listener output_listener = {
+@@ -3327,6 +3344,13 @@
+ 	surface = window_get_wl_surface(output->background->window);
+ 	weston_desktop_shell_set_background(desktop->shell,
+ 					    output->output, surface);
++
++	/* hexaOS: the screen's scale may have come before these windows
++	 * existed (it depends on the order Weston announces things), and
++	 * then they stayed at 100% on a 200% screen */
++	if (output->panel)
++		window_set_buffer_scale(output->panel->window, output->scale);
++	window_set_buffer_scale(output->background->window, output->scale);
+ }
+ 
+ static void
+diff -ruN a/desktop-shell/shell.c b/desktop-shell/shell.c
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -154,6 +154,21 @@
+ 		char *title;
+ 		char *app_id;
+ 	} tb;
++
++	/* hexaOS, drag a maximized window to restore it (like Windows): the
++	 * restored size comes in a later commit, then the window is put under
++	 * the pointer at the same place it was grabbed */
++	struct {
++		bool pending;
++		double fx;	/* grab point, fraction of the window width */
++		double dy;	/* grab point, distance from the window top */
++		struct weston_move_grab *grab;	/* the drag, while it lasts */
++		struct weston_coord_global pointer;	/* else here */
++	} unsnap;
++
++	/* hexaOS: a window opened bigger than its screen was made smaller;
++	 * center it on this screen once its new size arrives */
++	struct weston_output *recenter_output;
+ };
+ 
+ struct shell_grab {
+@@ -180,6 +195,13 @@
+ 	struct shell_grab base;
+ 	struct weston_coord_global delta;
+ 	bool client_initiated;
++
++	/* hexaOS window snapping (like Windows) */
++	bool restore_on_drag;	/* a maximized window: restore once dragged */
++	struct weston_coord_global start;	/* pointer at the start */
++	struct weston_coord_global start_pos;	/* window at the start */
++	struct weston_curtain *preview;	/* "it will be maximized here" */
++	struct weston_output *preview_output;
+ };
+ 
+ struct weston_touch_move_grab {
+@@ -1099,6 +1121,149 @@
+ 	return c;
+ }
+ 
++/*
++ * hexaOS window snapping, like Windows: drag a window to the top edge of a
++ * screen to maximize it there (a preview shows where), and drag a maximized
++ * window away to restore it.
++ */
++#define SNAP_DRAG_THRESHOLD 8	/* pixels before a maximized window lets go */
++#define SNAP_EDGE 2		/* pixels from the top that count as "the top" */
++
++static void
++set_maximized_on(struct shell_surface *shsurf, bool maximized,
++		 struct weston_output *output);
++
++/* The screen whose top edge the pointer is on, else NULL */
++static struct weston_output *
++pointer_snap_output(struct weston_pointer *pointer)
++{
++	struct weston_output *output;
++
++	wl_list_for_each(output, &pointer->seat->compositor->output_list, link) {
++		if (output->destroying ||
++		    !weston_output_contains_coord(output, pointer->pos))
++			continue;
++		if (pointer->pos.c.y < output->pos.c.y + SNAP_EDGE)
++			return output;
++		return NULL;
++	}
++	return NULL;
++}
++
++static int
++snap_preview_get_label(struct weston_surface *surface, char *buf, size_t len)
++{
++	return snprintf(buf, len, "hexaOS snap preview");
++}
++
++static void
++snap_preview_committed(struct weston_surface *es,
++		       struct weston_coord_surface new_origin)
++{
++}
++
++/* Shows the preview on OUTPUT's work area, or hides it (NULL) */
++static void
++snap_preview_update(struct weston_move_grab *move, struct weston_output *output)
++{
++	struct shell_surface *shsurf = move->base.shsurf;
++	struct weston_curtain_params params = {
++		.get_label = snap_preview_get_label,
++		.surface_committed = snap_preview_committed,
++		.r = 0.35, .g = 0.6, .b = 1.0, .a = 1.0,
++		.capture_input = false,
++	};
++	pixman_rectangle32_t area;
++
++	if (move->preview && move->preview_output != output) {
++		weston_shell_utils_curtain_destroy(move->preview);
++		move->preview = NULL;
++		move->preview_output = NULL;
++	}
++	if (!output || move->preview || !shsurf || !shsurf->desktop_surface ||
++	    !weston_view_is_mapped(shsurf->view))
++		return;
++
++	get_output_work_area(shsurf->shell, output, &area);
++	if (area.width == 0 || area.height == 0)
++		return;
++	params.pos.c = weston_coord(area.x, area.y);
++	params.width = area.width;
++	params.height = area.height;
++	move->preview = weston_shell_utils_curtain_create(shsurf->shell->compositor,
++							 &params);
++	if (!move->preview)
++		return;
++	move->preview_output = output;
++	weston_view_set_alpha(move->preview->view, 0.3);
++	weston_view_set_output(move->preview->view, output);
++	/* just behind the window being dragged */
++	weston_view_move_to_layer(move->preview->view, &shsurf->view->layer_link);
++}
++
++/* Dragging a maximized window: restore it, remembering where it was grabbed
++ * (see unsnap_place) */
++static void
++unsnap_start(struct shell_surface *shsurf, struct weston_move_grab *move,
++	     struct weston_pointer *pointer)
++{
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_geometry geo;
++	struct weston_coord_global pos;
++
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	if (geo.width <= 0 || geo.height <= 0) {
++		geo.x = 0;
++		geo.y = 0;
++		geo.width = surface->width;
++		geo.height = surface->height;
++	}
++	pos = weston_view_get_pos_offset_global(shsurf->view);
++
++	shsurf->unsnap.fx = geo.width > 0 ?
++		(move->start.c.x - (pos.c.x + geo.x)) / geo.width : 0.5;
++	shsurf->unsnap.fx = MAX(0.0, MIN(1.0, shsurf->unsnap.fx));
++	shsurf->unsnap.dy = MAX(0.0, move->start.c.y - (pos.c.y + geo.y));
++	shsurf->unsnap.grab = move;
++	shsurf->unsnap.pointer = pointer->pos;
++	shsurf->unsnap.pending = true;
++
++	set_maximized_on(shsurf, false, NULL);
++}
++
++/* The restored size arrived: put the window under the pointer, held at the
++ * same place of its title bar, and let the drag go on from there */
++static void
++unsnap_place(struct shell_surface *shsurf)
++{
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_move_grab *move = shsurf->unsnap.grab;
++	struct weston_geometry geo;
++	struct weston_coord_global ptr, pos;
++	double dy;
++
++	shsurf->unsnap.pending = false;
++	shsurf->unsnap.grab = NULL;
++
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	if (geo.width <= 0 || geo.height <= 0) {
++		geo.x = 0;
++		geo.y = 0;
++		geo.width = surface->width;
++		geo.height = surface->height;
++	}
++	ptr = move ? move->base.grab.pointer->pos : shsurf->unsnap.pointer;
++	dy = MIN(shsurf->unsnap.dy, MAX(0, geo.height - 1));
++
++	pos.c = weston_coord(ptr.c.x - shsurf->unsnap.fx * geo.width - geo.x,
++			     ptr.c.y - dy - geo.y);
++	weston_view_set_position(shsurf->view, pos);
++	if (move)
++		move->delta = weston_coord_global_sub(pos, ptr);
++}
++
+ static void
+ move_grab_motion(struct weston_pointer_grab *grab,
+ 		 const struct timespec *time,
+@@ -1113,34 +1278,76 @@
+ 	if (!shsurf || !shsurf->desktop_surface)
+ 		return;
+ 
++	/* hexaOS: a maximized window is restored once it is really dragged
++	 * (not on a plain click or double click of its title bar) */
++	if (move->restore_on_drag) {
++		if (fabs(pointer->pos.c.x - move->start.c.x) < SNAP_DRAG_THRESHOLD &&
++		    fabs(pointer->pos.c.y - move->start.c.y) < SNAP_DRAG_THRESHOLD)
++			return;
++		move->restore_on_drag = false;
++		if (weston_desktop_surface_get_maximized(shsurf->desktop_surface))
++			unsnap_start(shsurf, move, pointer);
++	}
++
++	/* waiting for the restored size (see unsnap_place) */
++	if (shsurf->unsnap.pending)
++		return;
++
+ 	pos = constrain_position(move);
+ 	weston_view_set_position(shsurf->view, pos);
++
++	snap_preview_update(move, pointer_snap_output(pointer));
++}
++
++static void
++move_grab_end(struct weston_move_grab *move)
++{
++	struct shell_surface *shsurf = move->base.shsurf;
++
++	snap_preview_update(move, NULL);
++	if (shsurf && shsurf->unsnap.grab == move) {
++		/* the drag is over, the restored window goes under the
++		 * pointer where it is now */
++		shsurf->unsnap.grab = NULL;
++		shsurf->unsnap.pointer = move->base.grab.pointer->pos;
++	}
++	shell_grab_end(&move->base);
++	free(move);
+ }
+ 
+ static void
+ move_grab_button(struct weston_pointer_grab *grab,
+ 		 const struct timespec *time, uint32_t button, uint32_t state_w)
+ {
+-	struct shell_grab *shell_grab = container_of(grab, struct shell_grab,
+-						    grab);
++	struct weston_move_grab *move = (struct weston_move_grab *) grab;
++	struct shell_surface *shsurf = move->base.shsurf;
+ 	struct weston_pointer *pointer = grab->pointer;
+ 	enum wl_pointer_button_state state = state_w;
++	struct weston_output *output;
+ 
+ 	if (pointer->button_count == 0 &&
+ 	    state == WL_POINTER_BUTTON_STATE_RELEASED) {
+-		shell_grab_end(shell_grab);
+-		free(grab);
++		/* hexaOS: dropped on the top edge of a screen: maximize it
++		 * there (like Windows) */
++		output = pointer_snap_output(pointer);
++		if (shsurf && shsurf->desktop_surface && move->preview &&
++		    output && !shsurf->unsnap.pending &&
++		    !shsurf_is_max_or_fullscreen(shsurf)) {
++			/* restoring it later goes back to where the drag
++			 * started, if that was on this screen */
++			shsurf->saved_pos = move->start_pos;
++			shsurf->saved_position_valid =
++				weston_output_contains_coord(output, move->start);
++			set_maximized_on(shsurf, true, output);
++		}
++		move_grab_end(move);
+ 	}
+ }
+ 
+ static void
+ move_grab_cancel(struct weston_pointer_grab *grab)
+ {
+-	struct shell_grab *shell_grab =
+-		container_of(grab, struct shell_grab, grab);
+-
+-	shell_grab_end(shell_grab);
+-	free(grab);
++	move_grab_end((struct weston_move_grab *) grab);
+ }
+ 
+ static const struct weston_pointer_grab_interface move_grab_interface = {
+@@ -1162,10 +1369,12 @@
+ 	if (!shsurf)
+ 		return -1;
+ 
+-	if (shsurf->grabbed || shsurf_is_max_or_fullscreen(shsurf))
++	/* hexaOS: maximized windows can be dragged too (that restores them) */
++	if (shsurf->grabbed ||
++	    weston_desktop_surface_get_fullscreen(shsurf->desktop_surface))
+ 		return 0;
+ 
+-	move = malloc(sizeof *move);
++	move = zalloc(sizeof *move);
+ 	if (!move)
+ 		return -1;
+ 
+@@ -1173,6 +1382,13 @@
+ 		weston_view_get_pos_offset_global(shsurf->view),
+ 		pointer->grab_pos);
+ 	move->client_initiated = client_initiated;
++	move->start = pointer->grab_pos;
++	move->start_pos = weston_view_get_pos_offset_global(shsurf->view);
++	move->restore_on_drag =
++		weston_desktop_surface_get_maximized(shsurf->desktop_surface);
++	shsurf->unsnap.pending = false;
++	shsurf->unsnap.grab = NULL;
++	shsurf->recenter_output = NULL;	/* the user places it now */
+ 
+ 	weston_desktop_surface_set_orientation(shsurf->desktop_surface,
+ 					       WESTON_TOP_LEVEL_TILED_ORIENTATION_NONE);
+@@ -2363,6 +2579,108 @@
+ #endif
+ }
+ 
++/*
++ * hexaOS: where a new window opens. On the screen under the pointer, inside
++ * its work area (the taskbar excluded). A window bigger than that screen
++ * (e.g. it remembered its size from a bigger or less scaled screen) is asked
++ * to fit it, and is centered when its new size arrives.
++ */
++static void
++place_new_window(struct desktop_shell *shell, struct shell_surface *shsurf)
++{
++	struct weston_compositor *compositor = shell->compositor;
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_output *output, *target = NULL;
++	struct weston_seat *seat;
++	struct weston_coord_global pos;
++	struct weston_coord_surface offset;
++	struct weston_geometry geo;
++	pixman_rectangle32_t area;
++	int32_t x, y, w, h;
++
++	pos.c = weston_coord(0, 0);
++	wl_list_for_each(seat, &compositor->seat_list, link) {
++		struct weston_pointer *pointer = weston_seat_get_pointer(seat);
++
++		if (pointer) {
++			pos = pointer->pos;
++			break;
++		}
++	}
++	wl_list_for_each(output, &compositor->output_list, link) {
++		if (!output->destroying &&
++		    weston_output_contains_coord(output, pos)) {
++			target = output;
++			break;
++		}
++	}
++	if (!target)
++		target = weston_shell_utils_get_default_output(compositor);
++	if (!target) {
++		weston_view_set_initial_position(shsurf->view, shell);
++		return;
++	}
++
++	get_output_work_area(shell, target, &area);
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	if (geo.width <= 0 || geo.height <= 0) {
++		geo.x = 0;
++		geo.y = 0;
++		geo.width = surface->width;
++		geo.height = surface->height;
++	}
++
++	w = geo.width;
++	h = geo.height;
++	if (w > (int32_t) area.width || h > (int32_t) area.height) {
++		w = MIN(w, (int32_t) area.width);
++		h = MIN(h, (int32_t) area.height);
++		weston_desktop_surface_set_size(shsurf->desktop_surface, w, h);
++		shsurf->recenter_output = target;
++		x = area.x;
++		y = area.y;
++	} else {
++		x = area.x;
++		y = area.y;
++		if ((int32_t) area.width > w)
++			x += random() % ((int32_t) area.width - w + 1);
++		if ((int32_t) area.height > h)
++			y += random() % ((int32_t) area.height - h + 1);
++	}
++
++	pos.c = weston_coord(x, y);
++	offset = weston_coord_surface(-geo.x, -geo.y, shsurf->view->surface);
++	weston_view_set_position_with_offset(shsurf->view, pos, offset);
++}
++
++/* After place_new_window asked a window to fit its screen: once it does,
++ * center it there (it may take a few commits for the new size to come) */
++static void
++recenter_if_it_fits(struct shell_surface *shsurf)
++{
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_output *o, *output = NULL;
++	struct weston_geometry geo;
++	pixman_rectangle32_t area;
++
++	wl_list_for_each(o, &surface->compositor->output_list, link)
++		if (o == shsurf->recenter_output && !o->destroying)
++			output = o;
++	if (!output) {
++		shsurf->recenter_output = NULL;
++		return;
++	}
++
++	get_output_work_area(shsurf->shell, output, &area);
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	if (geo.width > (int32_t) area.width || geo.height > (int32_t) area.height)
++		return;
++	shell_surface_center_on_output(shsurf, output);
++	shsurf->recenter_output = NULL;
++}
++
+ static void
+ map(struct desktop_shell *shell, struct shell_surface *shsurf)
+ {
+@@ -2379,7 +2697,7 @@
+ 	} else if (shsurf->xwayland.is_set) {
+ 		set_position_from_xwayland(shsurf);
+ 	} else {
+-		weston_view_set_initial_position(shsurf->view, shell);
++		place_new_window(shell, shsurf);
+ 	}
+ 
+ 	/* XXX: don't map without a buffer! */
+@@ -2532,7 +2850,16 @@
+ 
+ 		pos = weston_view_get_pos_offset_global(view);
+ 		weston_view_set_position_with_offset(shsurf->view, pos, offset);
++
++		/* hexaOS: restored by dragging it, or made to fit its
++		 * screen when it opened */
++		if (shsurf->unsnap.pending)
++			unsnap_place(shsurf);
++		if (shsurf->recenter_output)
++			recenter_if_it_fits(shsurf);
+ 	}
++	if (shsurf->state.fullscreen || shsurf->state.maximized)
++		shsurf->recenter_output = NULL;
+ 
+ 	shsurf->last_width = surface->width;
+ 	shsurf->last_height = surface->height;
+@@ -2706,8 +3033,10 @@
+ 	set_fullscreen(shsurf, fullscreen, output);
+ }
+ 
++/* hexaOS: OUTPUT, when not NULL, is the screen to maximize on (snapping) */
+ static void
+-set_maximized(struct shell_surface *shsurf, bool maximized)
++set_maximized_on(struct shell_surface *shsurf, bool maximized,
++		 struct weston_output *output)
+ {
+ 	struct weston_desktop_surface *desktop_surface = shsurf->desktop_surface;
+ 	struct weston_surface *surface =
+@@ -2717,9 +3046,9 @@
+ 		return;
+ 
+ 	if (maximized) {
+-		struct weston_output *output;
+-
+-		if (!weston_surface_is_mapped(surface))
++		if (output)
++			;
++		else if (!weston_surface_is_mapped(surface))
+ 			output = weston_shell_utils_get_focused_output(surface->compositor);
+ 		else	/* hexaOS: its own screen, even when minimized */
+ 			output = shell_surface_find_output(shsurf);
+@@ -2734,6 +3063,12 @@
+ }
+ 
+ static void
++set_maximized(struct shell_surface *shsurf, bool maximized)
++{
++	set_maximized_on(shsurf, maximized, NULL);
++}
++
++static void
+ desktop_surface_maximized_requested(struct weston_desktop_surface *desktop_surface,
+ 				    bool maximized, void *shell)
+ {

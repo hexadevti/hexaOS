@@ -26,8 +26,10 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/bin/hexa-dev                Ubuntu development container (Docker)
   usr/bin/hexa-settings-tui       text-mode Settings (console fallback)
   usr/bin/hexa-setup              applies this machine's settings (Start menu)
-  usr/bin/hexa-power              restart / shut down (Start menu)
-  usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login)
+  usr/bin/hexa-power              restart / shut down (Start menu): a window on the desktop, a text menu otherwise
+  usr/bin/hexa-steam              Steam (Start menu): installs it from Flathub on the first click
+  usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login),
+                                  folders -> Files
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
   etc/hexaos/setup.conf           values for hexa-setup, e.g. Wi-Fi password (not in git;
                                   template: board/hexaos/setup.conf.example)
@@ -43,8 +45,16 @@ package/hexa-firefox/             Firefox ESR (official Mozilla binary)
 package/hexa-vscode/              Visual Studio Code (official Microsoft binary)
 package/hexa-sof-bin/             Meteor Lake audio firmware
 package/hexa-max98390/            speaker amplifier driver (MAX98390, Galaxy Book4/5)
+package/hexa-power/               power window: shut down, restart, restart the desktop (GTK 3)
+package/hexa-files/               Files: file manager like Windows Explorer (GTK 3)
+package/hexa-flatpak/             Flatpak, for apps from Flathub such as Steam, with
+package/hexa-libostree/           its libraries (libostree without composefs, which needs
+package/hexa-appstream/           newer kernel headers than the toolchain's)
+package/hexa-libfyaml/
 patches/                          tweaks to Buildroot packages (splash colors; Weston: Alt+Tab,
-                                  Windows-style taskbar and Start menu)
+                                  Windows-style taskbar and Start menu, maximize on the right
+                                  screen, clipboard keeps plain text, window snapping, new
+                                  windows fit their screen, scale fixes)
 scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
@@ -87,9 +97,12 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Boot menu                  | hold Esc during boot                                    |
 | Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key), shortcuts, open windows (click shows / minimizes, middle click closes), volume (wheel changes, click mutes), clock |
 | Settings                   | Start menu (or `hexa-settings`): network, sound, display, wallpaper and taskbar, keyboard, mouse and touchpad, date and time, power, account, services, about; `hexa-settings-tui` in text mode |
-| Setup (Wi-Fi network...)   | Start menu (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`; safe to run again |
-| Restart / shut down        | Start menu > Power (or `hexa-power`); no password needed |
+| Setup (Wi-Fi network...)   | Start menu (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`, checks the internet by reaching Google, sets the screen scale (`SCALE=2` is 200%, applied when the desktop restarts); safe to run again |
+| Restart / shut down        | Start menu > Power (or `hexa-power`): Shut down, Restart or Restart desktop; no password needed (`hexa-power --text` for the text menu) |
 | Switch windows             | Alt+Tab (hold Alt, press Tab to move on, release Alt to pick); Super+Tab works too |
+| Maximize / restore         | drag a window to the top edge of a screen to maximize it there (a blue preview shows it); drag a maximized window down to restore it |
+| Files                      | Files icon on the taskbar (or `hexa-files folder`): Windows Explorer-style; drives, Trash, copy/paste, search, "Open with" |
+| Steam                      | Start menu > Steam: installs it from Flathub the first time (about 1 GB); its games stay in your home folder |
 | Wi-Fi log                  | `grep iwd: /var/log/messages`, `dmesg \| grep wlan0`     |
 | Wi-Fi (command line)       | `iwctl station wlan0 scan`, `iwctl station wlan0 connect "NetworkName"` |
 | Volume (command line)      | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 70%` (or `alsamixer`) |

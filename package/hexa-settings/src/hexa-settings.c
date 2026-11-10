@@ -3,7 +3,8 @@
  *
  * Pages on the left, as in Windows 11: Network, Sound, Display,
  * Personalization, Keyboard, Mouse & touchpad, Date & time, Power, Account,
- * Services and About. "hexa-settings PAGE" opens on one page (e.g. sound).
+ * Services and About. "hexa-settings PAGE" opens on one page (e.g. sound);
+ * "hexa-settings --set GROUP KEY VALUE" changes one desktop setting, no window.
  *
  * Desktop settings: what the user changes is kept in
  * ~/.config/hexaos/settings.ini and written out as ~/.config/hexaos/desktop.ini,
@@ -3186,6 +3187,21 @@ main(int argc, char **argv)
 	GApplicationFlags flags = G_APPLICATION_DEFAULT_FLAGS;
 	int status;
 
+	/* hexa-settings --set GROUP KEY VALUE: change one desktop setting with
+	 * no window, e.g. --set "output eDP-1" scale 2 (used by hexa-setup) */
+	if (argc == 5 && strcmp(argv[1], "--set") == 0) {
+		GError *e = NULL;
+
+		cfg_load();
+		g_key_file_set_value(user_ini, argv[2], argv[3], argv[4]);
+		g_mkdir_with_parents(conf_dir, 0755);
+		if (!g_key_file_save_to_file(user_ini, user_ini_path, &e)) {
+			fprintf(stderr, "hexa-settings: %s\n", e->message);
+			return 1;
+		}
+		write_desktop_ini();
+		return 0;
+	}
 	/* hexa-settings PAGE: open on that page (network, sound, display...) */
 	if (argc > 1 && argv[1][0] != '-')
 		start_page = argv[1];

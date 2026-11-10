@@ -1,0 +1,7 @@
+config BR2_PACKAGE_HEXA_POWER
+	bool "hexa-power"
+	depends on BR2_PACKAGE_LIBGTK3
+	help
+	  The hexaOS power window: shut down, restart, or restart the
+	  desktop. Opened by hexa-power (Start menu > Power) on the
+	  desktop; in text mode hexa-power shows a text menu instead.
