@@ -45,6 +45,19 @@ CONFIG_IWLWIFI=m
 CONFIG_IWLMVM=m
 CONFIG_IWLMLD=m
 
+# Bluetooth (Intel AX211: USB, btusb + btintel; firmware intel/ibt-*).
+# Modules, so the firmware is read from the root filesystem.
+# Classic (headphones, controllers) and Low Energy; RFCOMM for the headset
+# microphone profile (HFP), HIDP for keyboards and controllers.
+CONFIG_BT=m
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_BT_RFCOMM=m
+CONFIG_BT_RFCOMM_TTY=y
+CONFIG_BT_BNEP=m
+CONFIG_BT_HIDP=m
+CONFIG_BT_HCIBTUSB=m
+
 # Built-in touchpad and keyboard (I2C-HID via the Intel LPSS controller)
 CONFIG_MFD_INTEL_LPSS_PCI=y
 CONFIG_MFD_INTEL_LPSS_ACPI=y
@@ -157,16 +170,23 @@ CONFIG_NF_CONNTRACK_MARK=y
 CONFIG_NETFILTER_XT_CONNMARK=y
 CONFIG_IP6_NF_RAW=y
 
-# Game controllers (Xbox, PlayStation, Switch) and virtual input
+# Game controllers (Xbox, PlayStation, Switch) and virtual input.
+# hid-playstation (PS4/PS5) needs the multicolor LED class (light bar);
+# without it the driver is silently left out.
 CONFIG_INPUT_JOYDEV=m
 CONFIG_INPUT_JOYSTICK=y
 CONFIG_JOYSTICK_XPAD=m
 CONFIG_JOYSTICK_XPAD_FF=y
+CONFIG_LEDS_CLASS_MULTICOLOR=y
 CONFIG_HID_SONY=m
+CONFIG_SONY_FF=y
 CONFIG_HID_PLAYSTATION=m
+CONFIG_PLAYSTATION_FF=y
 CONFIG_HID_NINTENDO=m
 CONFIG_HIDRAW=y
-CONFIG_UHID=m
+# Built in: bluetoothd creates the input devices of Bluetooth controllers and
+# keyboards through /dev/uhid, which does not exist until the module is loaded
+CONFIG_UHID=y
 CONFIG_INPUT_UINPUT=m
 
 # USB drives and external disks (FAT, exFAT, NTFS) and AppImages (FUSE)

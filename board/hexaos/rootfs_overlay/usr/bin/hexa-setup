@@ -4,7 +4,7 @@
 # Safe to run again at any time: each step only changes what is not set yet.
 #
 # Steps: join the Wi-Fi network, check the internet (reach Google), set the
-# screen scale (e.g. 200%), choose the main screen.
+# screen scale (e.g. 200%), choose the main screen, set the timezone.
 #
 # The values (Wi-Fi network and password, scale...) come from /etc/hexaos/setup.conf,
 # which only root can read, so this asks for your password (sudo) first.
@@ -12,7 +12,7 @@
 # Adding a step: write a step_NAME function and add NAME to STEPS.
 
 CONF=/etc/hexaos/setup.conf
-STEPS=(wifi google scale screen)
+STEPS=(wifi google scale screen timezone)
 
 # shellcheck source=/usr/lib/hexaos/wifi.sh
 . /usr/lib/hexaos/wifi.sh
@@ -226,6 +226,37 @@ step_screen() {
         ok "Main screen set to $want."
         note "It takes effect when the desktop restarts (Start menu > Power > Restart desktop)."
     fi
+}
+
+# --------------------------------------------------------------- timezone
+
+step_timezone() {
+    title "Timezone"
+    local cur
+    if [ -z "$TIMEZONE" ]; then
+        note "TIMEZONE is not set in $CONF: skipped."
+        return
+    fi
+    case $TIMEZONE in
+        ""|*..*|/*|*[!A-Za-z0-9_/+-]*)
+            fail "TIMEZONE in $CONF is not valid: \"$TIMEZONE\"."; return ;;
+    esac
+    if [ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+        fail "Unknown timezone \"$TIMEZONE\" (examples: Europe/Dublin, America/Sao_Paulo)."
+        return
+    fi
+    cur=$(cat /etc/timezone 2>/dev/null)
+    if [ "$cur" = "$TIMEZONE" ] && [ "$(readlink /etc/localtime)" = "../usr/share/zoneinfo/$TIMEZONE" ]; then
+        ok "Timezone already $TIMEZONE ($(date '+%H:%M %Z'))."
+        return
+    fi
+    # Same as choosing it in Settings > Date & time
+    if ! ln -sf "../usr/share/zoneinfo/$TIMEZONE" /etc/localtime ||
+       ! echo "$TIMEZONE" > /etc/timezone; then
+        fail "Could not set the timezone."
+        return
+    fi
+    ok "Timezone set to $TIMEZONE ($(date '+%H:%M %Z'))."
 }
 
 # ------------------------------------------------------------------- main

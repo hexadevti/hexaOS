@@ -17,3 +17,7 @@ SCALE=2
 # screen), or a screen name such as HDMI-A-1 (Settings > Display lists them).
 # Leave empty to skip. Takes effect when the desktop restarts.
 PRIMARY_SCREEN=external
+
+# Timezone, as a name under /usr/share/zoneinfo (e.g. Europe/Dublin,
+# America/Sao_Paulo). Leave empty to skip.
+TIMEZONE='Europe/Dublin'

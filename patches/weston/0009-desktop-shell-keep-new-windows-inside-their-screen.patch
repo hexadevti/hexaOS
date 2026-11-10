@@ -1,0 +1,175 @@
+desktop-shell: keep new windows inside their screen
+
+A new window bigger than its screen is already asked to fit it when it
+opens, but two kinds of window still opened partly off the screen:
+
+- X11 apps (XWayland, Wine) choose where they open, and that position
+  was used as is, whatever the window's size.
+- Apps that open small and then grow to a size they remembered (from a
+  bigger or less scaled screen) were checked only when they opened.
+
+keep_window_on_screen() now handles both: a window bigger than the work
+area of the screen holding its center is asked to fit it, and centered
+once it does; a smaller one that sticks out is moved inside. It runs
+when an X11 window opens, and whenever a new window changes size by
+itself, until the user moves, resizes, maximizes or makes it full screen.
+
+diff --git a/desktop-shell/shell.c b/desktop-shell/shell.c
+index 3f9a42e..b035d22 100644
+--- a/desktop-shell/shell.c
++++ b/desktop-shell/shell.c
+@@ -171,6 +171,11 @@ struct shell_surface {
+ 	/* hexaOS: a window opened bigger than its screen was made smaller;
+ 	 * center it on this screen once its new size arrives */
+ 	struct weston_output *recenter_output;
++
++	/* hexaOS: a new window the user has not moved or resized yet; while
++	 * set, it is kept inside its screen when it changes size (apps that
++	 * open small and then grow to a remembered size) */
++	bool keep_on_screen;
+ };
+ 
+ struct shell_grab {
+@@ -1403,6 +1408,7 @@ surface_move(struct shell_surface *shsurf, struct weston_pointer *pointer,
+ 	shsurf->unsnap.pending = false;
+ 	shsurf->unsnap.grab = NULL;
+ 	shsurf->recenter_output = NULL;	/* the user places it now */
++	shsurf->keep_on_screen = false;
+ 
+ 	weston_desktop_surface_set_orientation(shsurf->desktop_surface,
+ 					       WESTON_TOP_LEVEL_TILED_ORIENTATION_NONE);
+@@ -1701,6 +1707,8 @@ surface_resize(struct shell_surface *shsurf,
+ 	resize->height = geometry.height;
+ 
+ 	shsurf->resize_edges = edges;
++	shsurf->recenter_output = NULL;	/* the user sizes it now */
++	shsurf->keep_on_screen = false;
+ 	weston_desktop_surface_set_resizing(shsurf->desktop_surface, true);
+ 	weston_desktop_surface_set_orientation(shsurf->desktop_surface,
+ 					       WESTON_TOP_LEVEL_TILED_ORIENTATION_NONE);
+@@ -2867,6 +2875,89 @@ recenter_if_it_fits(struct shell_surface *shsurf)
+ 	shsurf->recenter_output = NULL;
+ }
+ 
++/*
++ * hexaOS: keeps a window inside the work area of the screen it is on (the
++ * one holding its center, else the one it would open on). A window bigger
++ * than that is asked to fit it, and centered once it does (as in
++ * place_new_window); a smaller one that sticks out is moved in.
++ * Used for X11 apps, which choose where they open, and for new windows
++ * that grow after they open.
++ */
++static void
++keep_window_on_screen(struct shell_surface *shsurf)
++{
++	struct weston_compositor *compositor = shsurf->shell->compositor;
++	struct weston_surface *surface =
++		weston_desktop_surface_get_surface(shsurf->desktop_surface);
++	struct weston_output *o, *output = NULL;
++	struct weston_coord_global pos, center;
++	struct weston_coord_surface offset;
++	struct weston_geometry geo;
++	pixman_rectangle32_t area;
++	int32_t x, y, w, h, ax, ay, aw, ah;
++
++	geo = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
++	if (geo.width <= 0 || geo.height <= 0) {
++		geo.x = 0;
++		geo.y = 0;
++		geo.width = surface->width;
++		geo.height = surface->height;
++	}
++	if (geo.width <= 0 || geo.height <= 0)
++		return;
++
++	/* top-left corner of the window's visible part */
++	pos = weston_view_get_pos_offset_global(shsurf->view);
++	x = (int32_t) pos.c.x + geo.x;
++	y = (int32_t) pos.c.y + geo.y;
++	w = geo.width;
++	h = geo.height;
++
++	center.c = weston_coord(x + w / 2, y + h / 2);
++	wl_list_for_each(o, &compositor->output_list, link) {
++		if (!o->destroying && weston_output_contains_coord(o, center)) {
++			output = o;
++			break;
++		}
++	}
++	if (!output)
++		output = new_window_output(shsurf);
++	if (!output)
++		return;
++
++	get_output_work_area(shsurf->shell, output, &area);
++	ax = area.x;
++	ay = area.y;
++	aw = (int32_t) area.width;
++	ah = (int32_t) area.height;
++	if (aw <= 0 || ah <= 0)
++		return;
++
++	if (w > aw || h > ah) {
++		weston_desktop_surface_set_size(shsurf->desktop_surface,
++						MIN(w, aw), MIN(h, ah));
++		shsurf->recenter_output = output;
++		x = ax;
++		y = ay;
++	} else {
++		if (x + w > ax + aw)
++			x = ax + aw - w;
++		if (y + h > ay + ah)
++			y = ay + ah - h;
++		if (x < ax)
++			x = ax;
++		if (y < ay)
++			y = ay;
++		if (x == (int32_t) pos.c.x + geo.x &&
++		    y == (int32_t) pos.c.y + geo.y)
++			return;
++	}
++
++	pos.c = weston_coord(x, y);
++	offset = weston_coord_surface(-geo.x, -geo.y, shsurf->view->surface);
++	weston_view_set_position_with_offset(shsurf->view, pos, offset);
++}
++
+ static void
+ map(struct desktop_shell *shell, struct shell_surface *shsurf)
+ {
+@@ -2882,9 +2973,14 @@ map(struct desktop_shell *shell, struct shell_surface *shsurf)
+ 		set_maximized_position(shell, shsurf);
+ 	} else if (shsurf->xwayland.is_set) {
+ 		set_position_from_xwayland(shsurf);
++		/* hexaOS: X11 apps choose where they open; keep them inside
++		 * the screen, and smaller than it */
++		keep_window_on_screen(shsurf);
+ 	} else {
+ 		place_new_window(shell, shsurf);
+ 	}
++	shsurf->keep_on_screen =
++		!shsurf->state.fullscreen && !shsurf->state.maximized;
+ 
+ 	/* XXX: don't map without a buffer! */
+ 	weston_surface_map(surface);
+@@ -3043,9 +3139,18 @@ desktop_surface_committed_impl(struct weston_desktop_surface *desktop_surface,
+ 			unsnap_place(shsurf);
+ 		if (shsurf->recenter_output)
+ 			recenter_if_it_fits(shsurf);
+-	}
+-	if (shsurf->state.fullscreen || shsurf->state.maximized)
++		/* hexaOS: a new window that changed size by itself (e.g.
++		 * grew to a size it remembered) stays inside its screen */
++		else if (shsurf->keep_on_screen && !shsurf->resize_edges &&
++			 !shsurf->unsnap.pending &&
++			 (shsurf->last_width != surface->width ||
++			  shsurf->last_height != surface->height))
++			keep_window_on_screen(shsurf);
++	}
++	if (shsurf->state.fullscreen || shsurf->state.maximized) {
+ 		shsurf->recenter_output = NULL;
++		shsurf->keep_on_screen = false;
++	}
+ 
+ 	shsurf->last_width = surface->width;
+ 	shsurf->last_height = surface->height;
