@@ -1,9 +1,10 @@
 /*
  * hexa-settings: the hexaOS Settings app (GTK 3)
  *
- * Pages on the left, as in Windows 11: Network, Sound, Display,
+ * Pages on the left, as in Windows 11: Network, Bluetooth, Sound, Display,
  * Personalization, Keyboard, Mouse & touchpad, Date & time, Power, Account,
- * Services and About. "hexa-settings PAGE" opens on one page (e.g. sound);
+ * Services and About. "hexa-settings PAGE" opens on one page (e.g. sound),
+ * also in a window that is already open;
  * "hexa-settings --set GROUP KEY VALUE" changes one desktop setting, no window.
  *
  * Desktop settings: what the user changes is kept in
@@ -1517,6 +1518,387 @@ network_shown(void)
 		wifi_update_status();
 		wifi_scan();
 	}
+}
+
+/*
+ * Bluetooth (through /usr/bin/hexa-bluetooth, which the taskbar uses too)
+ */
+
+#define HEXA_BT		"/usr/bin/hexa-bluetooth"
+#define BT_SCAN_SECONDS	"20"
+
+static struct {
+	GtkWidget *power, *status, *body, *spinner, *search, *paired, *found, *found_note;
+	gboolean available, powered, filling, scanning, busy, refreshing, again;
+	guint poll;
+	char *last_list;
+} bt;
+
+static void bt_refresh(void);
+static void bt_scan(void);
+
+static gboolean
+bt_has_adapter(void)
+{
+	GDir *d = g_dir_open("/sys/class/bluetooth", 0, NULL);
+	const char *n;
+	gboolean found = FALSE;
+
+	while (d && !found && (n = g_dir_read_name(d)))
+		found = g_str_has_prefix(n, "hci");
+	if (d)
+		g_dir_close(d);
+	return found;
+}
+
+static void
+bt_spinner_update(void)
+{
+	if (bt.scanning || bt.busy)
+		gtk_spinner_start(GTK_SPINNER(bt.spinner));
+	else
+		gtk_spinner_stop(GTK_SPINNER(bt.spinner));
+	gtk_widget_set_sensitive(bt.search, !bt.scanning);
+	gtk_label_set_text(GTK_LABEL(bt.found_note), bt.scanning ?
+		"  Looking for devices..." :
+		"  Nothing found. Put your device in pairing mode and press Search.");
+}
+
+/* bluetoothctl names a device that has not said its name after its address
+ * ("AA-BB-CC-DD-EE-FF"): not worth showing */
+static gboolean
+bt_unnamed(const char *addr, const char *name)
+{
+	char *a = g_strdelimit(g_strdup(name), "-", ':');
+	gboolean same = g_ascii_strcasecmp(a, addr) == 0;
+
+	g_free(a);
+	return same || !*name;
+}
+
+static void
+bt_action_done(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	char *title = data;
+
+	bt.busy = FALSE;
+	bt_spinner_update();
+	if (!ok)
+		message(GTK_MESSAGE_ERROR, title, *err ? err :
+			"The device did not answer. Make sure it is turned on and close by.");
+	g_free(title);
+	bt_refresh();
+}
+
+static void
+bt_device_action(const char *verb, const char *addr, const char *name)
+{
+	const char *doing = strcmp(verb, "pair") == 0 ? "Pairing with" :
+			    strcmp(verb, "connect") == 0 ? "Connecting to" :
+			    strcmp(verb, "disconnect") == 0 ? "Disconnecting" : "Removing";
+	const char *fail = strcmp(verb, "pair") == 0 ? "Could not pair with" :
+			   strcmp(verb, "connect") == 0 ? "Could not connect to" :
+			   strcmp(verb, "disconnect") == 0 ? "Could not disconnect" :
+			   "Could not remove";
+	char *text;
+
+	if (bt.busy)
+		return;
+	bt.busy = TRUE;
+	bt_spinner_update();
+	text = g_strdup_printf("%s %s...", doing, name);
+	set_sub(bt.status, text);
+	g_free(text);
+	run_job(ARGV(HEXA_BT, verb, addr), NULL, bt_action_done,
+		g_strdup_printf("%s \"%s\"", fail, name));
+}
+
+static void
+on_bt_device(GtkButton *b, gpointer data)
+{
+	const char *verb = data;
+	const char *addr = g_object_get_data(G_OBJECT(b), "addr");
+	const char *name = g_object_get_data(G_OBJECT(b), "name");
+
+	if (strcmp(verb, "remove") == 0) {
+		char *title = g_strdup_printf("Remove \"%s\"?", name);
+		gboolean yes = confirm(title, "To use it again, you will have to pair it again "
+				       "(put it in pairing mode and press Search).", "Remove");
+
+		g_free(title);
+		if (!yes)
+			return;
+	}
+	bt_device_action(verb, addr, name);
+}
+
+static GtkWidget *
+bt_button(const char *label, const char *verb, const char *addr, const char *name)
+{
+	GtkWidget *b = button_new(label, G_CALLBACK(on_bt_device), (gpointer) verb);
+
+	gtk_widget_set_valign(b, GTK_ALIGN_CENTER);
+	g_object_set_data_full(G_OBJECT(b), "addr", g_strdup(addr), g_free);
+	g_object_set_data_full(G_OBJECT(b), "name", g_strdup(name), g_free);
+	gtk_widget_set_sensitive(b, !bt.busy);
+	return b;
+}
+
+static void
+bt_add_device(GtkWidget *list, const char *addr, const char *name, gboolean paired,
+	      gboolean connected)
+{
+	GtkWidget *row, *box, *text;
+
+	row = gtk_list_box_row_new();
+	gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
+	box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+	add_class(box, "hx-row");
+	gtk_box_pack_start(GTK_BOX(box),
+		gtk_image_new_from_icon_name(connected ? "bluetooth-active-symbolic" :
+					     "bluetooth-symbolic", GTK_ICON_SIZE_LARGE_TOOLBAR),
+		FALSE, FALSE, 0);
+	text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+	gtk_widget_set_valign(text, GTK_ALIGN_CENTER);
+	gtk_box_pack_start(GTK_BOX(text), label_new(name, connected ? "hx-strong" : NULL),
+			   FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(text), label_new(connected ? "Connected" :
+			   paired ? "Paired, not connected" : addr, "hx-dim"), FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(box), text, TRUE, TRUE, 0);
+	if (paired) {
+		gtk_box_pack_end(GTK_BOX(box), bt_button("Remove", "remove", addr, name),
+				 FALSE, FALSE, 0);
+		gtk_box_pack_end(GTK_BOX(box), connected ?
+				 bt_button("Disconnect", "disconnect", addr, name) :
+				 bt_button("Connect", "connect", addr, name), FALSE, FALSE, 0);
+	} else {
+		gtk_box_pack_end(GTK_BOX(box), bt_button("Pair", "pair", addr, name),
+				 FALSE, FALSE, 0);
+	}
+	gtk_container_add(GTK_CONTAINER(row), box);
+	gtk_container_add(GTK_CONTAINER(list), row);
+	gtk_widget_show_all(row);
+}
+
+static void
+bt_got_list(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	char **lines, **l;
+	int n_connected = 0;
+	char *first = NULL, *text;
+
+	bt.refreshing = FALSE;
+	/* rebuild only on a change: the rows (and their buttons) stay put while
+	 * the list is polled during a search */
+	if (g_strcmp0(out, bt.last_list) != 0 || bt.busy) {
+		g_free(bt.last_list);
+		bt.last_list = bt.busy ? NULL : g_strdup(out);
+		list_clear(bt.paired);
+		list_clear(bt.found);
+		lines = g_strsplit(out, "\n", -1);
+		for (l = lines; *l; l++) {
+			char **f = g_strsplit(*l, "\t", 4);
+
+			if (g_strv_length(f) == 4) {
+				gboolean paired = f[1][0] == '1', connected = f[2][0] == '1';
+
+				if (paired)
+					bt_add_device(bt.paired, f[0], f[3], TRUE, connected);
+				else if (!bt_unnamed(f[0], f[3]))
+					bt_add_device(bt.found, f[0], f[3], FALSE, FALSE);
+			}
+			g_strfreev(f);
+		}
+		g_strfreev(lines);
+	}
+
+	if (!bt.busy) {
+		lines = g_strsplit(out, "\n", -1);
+		for (l = lines; *l; l++) {
+			char **f = g_strsplit(*l, "\t", 4);
+
+			if (g_strv_length(f) == 4 && f[2][0] == '1' && n_connected++ == 0)
+				first = g_strdup(f[3]);
+			g_strfreev(f);
+		}
+		g_strfreev(lines);
+		if (n_connected == 0)
+			text = g_strdup("On, nothing connected");
+		else if (n_connected == 1)
+			text = g_strdup_printf("Connected to %s", first);
+		else
+			text = g_strdup_printf("Connected to %s and %d more", first, n_connected - 1);
+		set_sub(bt.status, text);
+		g_free(text);
+		g_free(first);
+	}
+	if (bt.again) {
+		bt.again = FALSE;
+		bt_refresh();
+	}
+}
+
+static void
+bt_got_status(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	gboolean was = bt.powered;
+
+	bt.powered = strstr(out, "powered 1") != NULL;
+	bt.filling = TRUE;
+	gtk_switch_set_active(GTK_SWITCH(bt.power), bt.powered);
+	bt.filling = FALSE;
+	gtk_widget_set_visible(bt.body, bt.powered);
+	if (!bt.powered) {
+		bt.refreshing = FALSE;
+		if (!bt.busy)
+			set_sub(bt.status, strstr(out, "powered") ? "Bluetooth is turned off." :
+				"The Bluetooth service is not answering.");
+		g_clear_pointer(&bt.last_list, g_free);
+		bt.again = FALSE;
+		return;
+	}
+	run_job(ARGV(HEXA_BT, "list"), NULL, bt_got_list, NULL);
+	if (!was && !bt.scanning)
+		bt_scan();
+}
+
+static void
+bt_refresh(void)
+{
+	if (!bt.available)
+		return;
+	if (bt.refreshing) {
+		bt.again = TRUE;
+		return;
+	}
+	bt.refreshing = TRUE;
+	run_job(ARGV(HEXA_BT, "status"), NULL, bt_got_status, NULL);
+}
+
+static gboolean
+bt_poll(gpointer data)
+{
+	bt_refresh();
+	return G_SOURCE_CONTINUE;
+}
+
+static void
+bt_scan_done(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	bt.scanning = FALSE;
+	if (bt.poll) {
+		g_source_remove(bt.poll);
+		bt.poll = 0;
+	}
+	bt_spinner_update();
+	bt_refresh();
+}
+
+static void
+bt_scan(void)
+{
+	if (!bt.available || !bt.powered || bt.scanning)
+		return;
+	bt.scanning = TRUE;
+	bt_spinner_update();
+	run_job(ARGV(HEXA_BT, "scan", BT_SCAN_SECONDS), NULL, bt_scan_done, NULL);
+	/* show what turns up while the search goes on */
+	bt.poll = g_timeout_add_seconds(3, bt_poll, NULL);
+}
+
+static void
+on_bt_search(GtkButton *b, gpointer data)
+{
+	bt_scan();
+}
+
+static void
+bt_power_done(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	if (!ok)
+		message(GTK_MESSAGE_ERROR, "Could not turn Bluetooth on or off",
+			*err ? err : out);
+	bt_refresh();
+}
+
+static void
+on_bt_power(GObject *sw, GParamSpec *ps, gpointer data)
+{
+	gboolean on;
+
+	if (bt.filling)
+		return;
+	on = gtk_switch_get_active(GTK_SWITCH(bt.power));
+	set_sub(bt.status, on ? "Turning on..." : "Turning off...");
+	run_job(ARGV(HEXA_BT, "power", on ? "on" : "off"), NULL, bt_power_done, NULL);
+}
+
+static GtkWidget *
+build_bluetooth(void)
+{
+	GtkWidget *page = page_new("Bluetooth", "Headphones, speakers, game controllers, "
+				   "mice and keyboards."), *list, *head, *outer, *note;
+	char *cpu;
+
+	bt.available = bt_has_adapter();
+	list = section(NULL);
+	if (!bt.available) {
+		cpu = read_file("/proc/cpuinfo");
+		add_row(list, "No Bluetooth adapter",
+			cpu && strstr(cpu, " hypervisor") ?
+			"This is a virtual machine, which has no Bluetooth. A USB Bluetooth "
+			"adapter can be passed through to it." :
+			"No Bluetooth adapter was found. Check that Bluetooth is not turned "
+			"off in the BIOS/UEFI setup, or plug in a USB Bluetooth adapter.",
+			NULL, NULL);
+		g_free(cpu);
+		return page;
+	}
+	bt.power = gtk_switch_new();
+	add_row(list, "Bluetooth", "", bt.power, &bt.status);
+	g_signal_connect(bt.power, "notify::active", G_CALLBACK(on_bt_power), NULL);
+
+	/* everything below shows only while Bluetooth is on */
+	outer = page_box;
+	bt.body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+	gtk_box_pack_start(GTK_BOX(outer), bt.body, FALSE, FALSE, 0);
+	page_box = bt.body;
+
+	bt.paired = section("Your devices");
+	gtk_list_box_set_placeholder(GTK_LIST_BOX(bt.paired),
+		label_new("  No devices yet: add one below.", "hx-dim"));
+
+	head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+	gtk_widget_set_margin_top(head, 14);
+	gtk_box_pack_start(GTK_BOX(head), label_new("Add a device", "hx-section-inline"),
+			   FALSE, FALSE, 0);
+	bt.spinner = gtk_spinner_new();
+	gtk_box_pack_start(GTK_BOX(head), bt.spinner, FALSE, FALSE, 0);
+	bt.search = button_new("Search", G_CALLBACK(on_bt_search), NULL);
+	gtk_box_pack_end(GTK_BOX(head), bt.search, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(page_box), head, FALSE, FALSE, 0);
+	note = label_new("Put the device in pairing mode first: usually by holding its "
+			     "power or Bluetooth button until a light blinks (on a PlayStation "
+			     "controller, hold PS and Create). Devices that ask for a PIN code "
+			     "cannot be paired here yet.", "hx-dim");
+	gtk_box_pack_start(GTK_BOX(page_box), note, FALSE, FALSE, 0);
+	bt.found = section(NULL);
+	bt.found_note = label_new("", "hx-dim");
+	gtk_list_box_set_placeholder(GTK_LIST_BOX(bt.found), bt.found_note);
+
+	page_box = outer;
+	bt_spinner_update();
+	return page;
+}
+
+static void
+bluetooth_shown(void)
+{
+	if (!bt.available)
+		return;
+	g_clear_pointer(&bt.last_list, g_free);
+	bt_refresh();
+	bt_scan();
 }
 
 /*
@@ -3127,6 +3509,7 @@ static const struct {
 	void (*shown)(void);
 } pages[] = {
 	{ "network", "Network & internet", "network-wireless-symbolic", build_network, network_shown },
+	{ "bluetooth", "Bluetooth", "bluetooth-symbolic", build_bluetooth, bluetooth_shown },
 	{ "sound", "Sound", "audio-volume-high-symbolic", build_sound, sound_refresh },
 	{ "display", "Display", "video-display-symbolic", build_display, NULL },
 	{ "personalization", "Personalization", "preferences-desktop-wallpaper-symbolic",
@@ -3267,6 +3650,40 @@ activate(GtkApplication *app, gpointer data)
 				gtk_list_box_get_row_at_index(GTK_LIST_BOX(nav), first));
 }
 
+/* hexa-settings [PAGE], in this process or sent from another one: open the
+ * window, or show the open one, on that page (network, bluetooth, sound...) */
+static int
+on_command_line(GApplication *app, GApplicationCommandLine *cl, gpointer data)
+{
+	int argc, i;
+	char **argv = g_application_command_line_get_arguments(cl, &argc);
+	const char *page = argc > 1 && argv[1][0] != '-' ? argv[1] : NULL;
+
+	if (!win) {
+		start_page = page ? g_strdup(page) : NULL;
+		activate(GTK_APPLICATION(app), NULL);
+	} else if (page) {
+		for (i = 0; i < (int) G_N_ELEMENTS(pages); i++) {
+			GtkListBoxRow *row;
+
+			if (strcmp(page, pages[i].id) != 0)
+				continue;
+			row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(nav), i);
+			if (row == gtk_list_box_get_selected_row(GTK_LIST_BOX(nav))) {
+				if (pages[i].shown)
+					pages[i].shown();
+			} else {
+				gtk_list_box_select_row(GTK_LIST_BOX(nav), row);
+			}
+		}
+		gtk_window_present(GTK_WINDOW(win));
+	} else {
+		gtk_window_present(GTK_WINDOW(win));
+	}
+	g_strfreev(argv);
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3289,17 +3706,19 @@ main(int argc, char **argv)
 		write_desktop_ini();
 		return 0;
 	}
-	/* hexa-settings PAGE: open on that page (network, sound, display...) */
-	if (argc > 1 && argv[1][0] != '-')
-		start_page = argv[1];
-	/* single instance through the session bus, when there is one */
+	/* single instance through the session bus, when there is one; the
+	 * page name goes to the running instance (on_command_line) */
+	flags |= G_APPLICATION_HANDLES_COMMAND_LINE;
 	if (!g_getenv("DBUS_SESSION_BUS_ADDRESS"))
 		flags |= G_APPLICATION_NON_UNIQUE;
 
 	g_set_prgname(APP_ID);	/* GTK3 sends it as the Wayland app-id */
 	app = gtk_application_new(APP_ID, flags);
 	g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
-	status = g_application_run(G_APPLICATION(app), 1, argv);
+	g_signal_connect(app, "command-line", G_CALLBACK(on_command_line), NULL);
+	/* only the page name is passed on: GApplication would refuse other options */
+	status = g_application_run(G_APPLICATION(app),
+				   argc > 1 && argv[1][0] != '-' ? 2 : 1, argv);
 	g_object_unref(app);
 	return status;
 }

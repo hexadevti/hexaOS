@@ -1,0 +1,139 @@
+#!/bin/bash
+# hexa-bluetooth: Bluetooth for the taskbar and Settings (a wrapper around
+# bluetoothctl, so they never talk to BlueZ directly).
+#
+#   hexa-bluetooth status            for the taskbar: "powered 0|1", then one
+#                                    "dev CONNECTED ADDRESS NAME" line per
+#                                    paired device; nothing without an adapter
+#   hexa-bluetooth list              for Settings: one line per known device,
+#                                    "ADDRESS<TAB>PAIRED<TAB>CONNECTED<TAB>NAME"
+#   hexa-bluetooth power on|off
+#   hexa-bluetooth scan SECONDS      look for new devices for that long
+#   hexa-bluetooth pair ADDRESS      pair, trust (reconnects by itself) and connect
+#   hexa-bluetooth connect|disconnect|remove ADDRESS
+#
+# Pairing uses "Just Works" (no PIN): headphones, speakers, game controllers
+# and most mice. Devices that ask for a PIN need bluetoothctl in a terminal.
+
+export LC_ALL=C
+
+# bluetoothctl waits forever when bluetoothd is not running: give up after
+# $BT_WAIT seconds. The watchdog writes nowhere, so a caller reading our
+# output is not kept waiting by it.
+BT_WAIT=5
+bt() {
+    local pid watchdog rc
+    bluetoothctl "$@" </dev/null 2>&1 &
+    pid=$!
+    ( sleep "$BT_WAIT"; kill "$pid" ) >/dev/null 2>&1 &
+    watchdog=$!
+    wait "$pid"
+    rc=$?
+    kill "$watchdog" 2>/dev/null
+    return $rc
+}
+
+# Without an adapter there is nothing to ask bluetoothd
+have_adapter() {
+    compgen -G "/sys/class/bluetooth/hci*" >/dev/null
+}
+
+# "Device AA:BB:CC:DD:EE:FF Name" lines -> "AA:BB:CC:DD:EE:FF Name"
+devices() {
+    bt devices "$@" | sed -n 's/^Device \([0-9A-Fa-f:]\{17\}\) \(.*\)$/\1 \2/p'
+}
+
+check_address() {
+    if [[ ! $1 =~ ^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$ ]]; then
+        echo "Not a Bluetooth address: \"$1\"" >&2
+        exit 2
+    fi
+}
+
+# Runs a bluetoothctl command and succeeds when its output has $ok in it
+# (bluetoothctl does not always set its exit status)
+bt_ok() {
+    local ok=$1 out
+    shift
+    out=$(bt "$@")
+    if grep -q "$ok" <<<"$out"; then
+        return 0
+    fi
+    # the last "Failed..." / "org.bluez.Error..." line says why
+    grep -E "Fail|Error|not available" <<<"$out" | tail -n 1 >&2
+    return 1
+}
+
+cmd=$1
+shift
+
+case $cmd in
+status)
+    have_adapter || exit 0
+    powered=0
+    bt show | grep -q "Powered: yes" && powered=1
+    echo "powered $powered"
+    [ $powered = 1 ] || exit 0
+    connected=$(devices Connected | cut -d' ' -f1)
+    devices Paired | while read -r addr name; do
+        c=0
+        grep -qx "$addr" <<<"$connected" && c=1
+        echo "dev $c $addr $name"
+    done
+    ;;
+list)
+    have_adapter || exit 0
+    paired=$(devices Paired | cut -d' ' -f1)
+    connected=$(devices Connected | cut -d' ' -f1)
+    devices | while read -r addr name; do
+        p=0 c=0
+        grep -qx "$addr" <<<"$paired" && p=1
+        grep -qx "$addr" <<<"$connected" && c=1
+        printf '%s\t%s\t%s\t%s\n' "$addr" "$p" "$c" "$name"
+    done
+    ;;
+power)
+    case $1 in
+    on|off) ;;
+    *) echo "usage: hexa-bluetooth power on|off" >&2; exit 2 ;;
+    esac
+    have_adapter || { echo "No Bluetooth adapter." >&2; exit 1; }
+    bt_ok "succeeded" power "$1"
+    ;;
+scan)
+    secs=${1:-15}
+    [[ $secs =~ ^[0-9]+$ ]] || secs=15
+    have_adapter || { echo "No Bluetooth adapter." >&2; exit 1; }
+    # discovery stops when bluetoothctl exits
+    BT_WAIT=$((secs + 5))
+    bt --timeout "$secs" scan on >/dev/null
+    exit 0
+    ;;
+pair)
+    check_address "$1"
+    BT_WAIT=40
+    bt_ok "Pairing successful\|AlreadyExists" --agent NoInputNoOutput pair "$1" || exit 1
+    BT_WAIT=5
+    bt_ok "succeeded" trust "$1" || exit 1
+    BT_WAIT=20
+    # pairing worked even if the first connection does not
+    bt_ok "Connection successful" connect "$1" || true
+    ;;
+connect)
+    check_address "$1"
+    BT_WAIT=20
+    bt_ok "Connection successful" connect "$1"
+    ;;
+disconnect)
+    check_address "$1"
+    bt_ok "Successful disconnected\|successful" disconnect "$1"
+    ;;
+remove)
+    check_address "$1"
+    bt_ok "Device has been removed" remove "$1"
+    ;;
+*)
+    sed -n '2,/^$/s/^# \{0,1\}//p' "$0" >&2
+    exit 2
+    ;;
+esac

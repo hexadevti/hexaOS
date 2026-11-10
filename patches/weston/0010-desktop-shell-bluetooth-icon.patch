@@ -1,0 +1,640 @@
+desktop-shell: Bluetooth icon on the taskbar
+
+A Bluetooth icon left of the volume, shown only when the computer has a
+Bluetooth adapter. It is dimmed while Bluetooth is off and has a cyan dot
+while a device is connected; the tooltip names the connected device.
+
+A click opens a menu: turn Bluetooth on or off, the paired devices (a
+click connects or disconnects one) and "Bluetooth settings" (Settings,
+on its Bluetooth page; "Add a device..." when nothing is paired yet).
+
+The state comes from "hexa-bluetooth status", read in the background
+every few seconds like the volume, and again soon after a change.
+
+--- a/clients/desktop-shell.c
++++ b/clients/desktop-shell.c
+@@ -71,6 +71,7 @@
+ #define TASK_MAX_WIDTH		200
+ #define TASK_GAP		4
+ #define VOLUME_WIDTH		64
++#define BLUETOOTH_WIDTH		36
+ #define CLOCK_WIDTH		92
+ #define ICON_SIZE		24
+ #define MENU_WIDTH		300
+@@ -81,6 +82,9 @@
+ #define HEXA_TASKMGR		"/usr/bin/hexa-taskmgr"
+ #define HEXA_TASKMGR_ID		"org.hexaos.TaskManager"
+ #define HEXA_SETTINGS_ID	"org.hexaos.Settings"
++#define HEXA_BLUETOOTH		"/usr/bin/hexa-bluetooth"
++#define BT_POLL_SECONDS		5
++#define BT_MAX_DEVICES		6
+ 
+ /* hexaOS palette (see board/hexaos/art/common.ps) */
+ #define HEXA_CYAN	0.133, 0.827, 0.933
+@@ -139,6 +143,36 @@
+ 	struct task reader_task;
+ };
+ 
++/* A paired Bluetooth device */
++struct bt_device {
++	char addr[18];		/* AA:BB:CC:DD:EE:FF */
++	char name[64];
++	bool connected;
++};
++
++/* What "hexa-bluetooth status" said (compared whole to spot changes) */
++struct bt_info {
++	bool available;		/* there is an adapter: show the icon */
++	bool powered;
++	int n_devices;
++	struct bt_device devices[BT_MAX_DEVICES];
++};
++
++struct bluetooth_state {
++	struct desktop *desktop;
++	struct bt_info info;
++	struct toytimer timer;
++	char tooltip[128];
++
++	/* "hexa-bluetooth status" runs in the background, like wpctl */
++	pid_t reader_pid;
++	int reader_fd;
++	int reader_ticks;
++	char reader_buf[2048];
++	size_t reader_len;
++	struct task reader_task;
++};
++
+ /* A line of the Start menu */
+ enum menu_row_kind {
+ 	ROW_ITEM,		/* a [launcher] */
+@@ -179,6 +213,9 @@
+ 	CTX_SHOW_DESKTOP,
+ 	CTX_REMOVE_FROM_START,	/* hide ctx_entry::item from the Start menu */
+ 	CTX_RESTORE_START,	/* show every removed launcher again */
++	CTX_BT_POWER,		/* turn Bluetooth on or off */
++	CTX_BT_DEVICE,		/* connect/disconnect context_menu::bt_addr[arg] */
++	CTX_BT_SETTINGS,	/* Settings, on the Bluetooth page */
+ };
+ 
+ #define CTX_MAX_ENTRIES		12
+@@ -189,6 +226,8 @@
+ 	struct menu_item *item;	/* CTX_LAUNCH, CTX_PIN, CTX_UNPIN, CTX_REMOVE_* */
+ 	bool enabled;
+ 	bool separator;		/* draw a line above this entry */
++	bool checked;		/* CTX_BT_*: draw the glyph highlighted */
++	int arg;		/* CTX_BT_DEVICE: index in context_menu::bt_* */
+ 	int y, height;		/* position in the menu */
+ };
+ 
+@@ -203,6 +242,11 @@
+ 	uint32_t window_id;	/* window the menu is about, 0 for none */
+ 	struct ctx_entry entries[CTX_MAX_ENTRIES];
+ 	int count;
++	/* Bluetooth menu: copies, so the entries stay valid while the
++	 * device list is read again */
++	char bt_addr[BT_MAX_DEVICES][18];
++	char bt_label[BT_MAX_DEVICES][96];
++	bool bt_connected[BT_MAX_DEVICES];
+ };
+ 
+ struct desktop {
+@@ -241,6 +285,7 @@
+ 	struct menu_item *ctx_pending_item;
+ 	int ctx_pending_x, ctx_pending_y;
+ 	struct volume_state volume;
++	struct bluetooth_state bluetooth;
+ };
+ 
+ struct surface {
+@@ -275,6 +320,9 @@
+ 	struct widget *volume;
+ 	int volume_hover;
+ 
++	struct widget *bluetooth;
++	int bluetooth_hover;
++
+ 	struct panel_clock *clock;
+ 	int painted;
+ 	enum weston_desktop_shell_panel_position panel_position;
+@@ -348,6 +396,7 @@
+ 	CTX_FOR_START,		/* the Start button (Win+X menu on Windows) */
+ 	CTX_FOR_TASKBAR,	/* an empty part of the taskbar */
+ 	CTX_FOR_START_ITEM,	/* an app in the Start menu */
++	CTX_FOR_BLUETOOTH,	/* the Bluetooth icon */
+ };
+ 
+ static void
+@@ -1480,6 +1529,317 @@
+ }
+ 
+ /*
++ * Bluetooth (BlueZ, through hexa-bluetooth)
++ */
++
++static int
++bluetooth_connected_count(struct bluetooth_state *bt)
++{
++	int i, n = 0;
++
++	for (i = 0; i < bt->info.n_devices; i++)
++		if (bt->info.devices[i].connected)
++			n++;
++	return n;
++}
++
++/* "powered 1", then "dev CONNECTED ADDRESS NAME" lines; no output at all
++ * when there is no adapter */
++static void
++bluetooth_parse(struct bluetooth_state *bt, struct bt_info *info)
++{
++	char *line, *save = NULL;
++
++	memset(info, 0, sizeof *info);
++	for (line = strtok_r(bt->reader_buf, "\n", &save); line;
++	     line = strtok_r(NULL, "\n", &save)) {
++		char addr[18];
++		int v, len = strlen(line);
++
++		if (sscanf(line, "powered %d", &v) == 1) {
++			info->available = true;
++			info->powered = v != 0;
++		} else if (info->n_devices < BT_MAX_DEVICES &&
++			   sscanf(line, "dev %d %17s %n", &v, addr, &len) == 2) {
++			struct bt_device *d = &info->devices[info->n_devices++];
++
++			snprintf(d->addr, sizeof d->addr, "%s", addr);
++			snprintf(d->name, sizeof d->name, "%s",
++				 line[len] ? line + len : addr);
++			d->connected = v != 0;
++		}
++	}
++}
++
++static void
++bluetooth_reader_finish(struct bluetooth_state *bt)
++{
++	struct desktop *desktop = bt->desktop;
++	struct bt_info info;
++
++	display_unwatch_fd(desktop->display, bt->reader_fd);
++	close(bt->reader_fd);
++	bt->reader_fd = -1;
++	bt->reader_pid = 0;
++
++	bt->reader_buf[bt->reader_len] = '\0';
++	bluetooth_parse(bt, &info);
++	if (memcmp(&info, &bt->info, sizeof info) != 0) {
++		bt->info = info;
++		panels_update(desktop);
++	}
++}
++
++static void
++bluetooth_reader_func(struct task *task, uint32_t events)
++{
++	struct bluetooth_state *bt =
++		container_of(task, struct bluetooth_state, reader_task);
++	size_t room = sizeof bt->reader_buf - 1 - bt->reader_len;
++	ssize_t n;
++
++	n = read(bt->reader_fd, bt->reader_buf + bt->reader_len, room);
++	if (n > 0) {
++		bt->reader_len += n;
++		if (bt->reader_len < sizeof bt->reader_buf - 1)
++			return;		/* wait for more, or end of file */
++	} else if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
++		return;
++	}
++	bluetooth_reader_finish(bt);
++}
++
++/* Starts reading the Bluetooth state in the background */
++static void
++bluetooth_read(struct bluetooth_state *bt)
++{
++	int fds[2];
++	pid_t pid;
++
++	if (bt->reader_pid > 0) {
++		/* still running: give up on it after a few ticks */
++		if (++bt->reader_ticks >= 3)
++			kill(bt->reader_pid, SIGKILL);
++		return;
++	}
++
++	if (pipe2(fds, O_CLOEXEC) < 0)
++		return;
++
++	pid = fork();
++	if (pid < 0) {
++		close(fds[0]);
++		close(fds[1]);
++		return;
++	}
++	if (pid == 0) {
++		dup2(fds[1], STDOUT_FILENO);
++		execl(HEXA_BLUETOOTH, "hexa-bluetooth", "status", (char *) NULL);
++		_exit(127);
++	}
++
++	close(fds[1]);
++	fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
++	bt->reader_pid = pid;
++	bt->reader_fd = fds[0];
++	bt->reader_ticks = 0;
++	bt->reader_len = 0;
++	bt->reader_task.run = bluetooth_reader_func;
++	display_watch_fd(bt->desktop->display, fds[0],
++			 EPOLLIN | EPOLLHUP | EPOLLERR, &bt->reader_task);
++}
++
++static void
++bluetooth_timer_func(struct toytimer *tt)
++{
++	bluetooth_read(container_of(tt, struct bluetooth_state, timer));
++}
++
++/* Reads the state again in SECONDS (after a change), then as usual */
++static void
++bluetooth_poll_in(struct bluetooth_state *bt, int seconds)
++{
++	struct itimerspec its = {
++		.it_interval = { .tv_sec = BT_POLL_SECONDS },
++		.it_value = { .tv_sec = seconds },
++	};
++
++	toytimer_arm(&bt->timer, &its);
++}
++
++static void
++bluetooth_set_power(struct bluetooth_state *bt, bool on)
++{
++	run_command(on ? HEXA_BLUETOOTH " power on" :
++			 HEXA_BLUETOOTH " power off");
++	/* show it right away; the next reading confirms it */
++	bt->info.powered = on;
++	if (!on)
++		bt->info.n_devices = 0;
++	panels_update(bt->desktop);
++	bluetooth_poll_in(bt, 2);
++}
++
++/* ADDR comes from hexa-bluetooth, but check it before it goes to a shell */
++static bool
++bluetooth_addr_ok(const char *addr)
++{
++	int i;
++
++	if (strlen(addr) != 17)
++		return false;
++	for (i = 0; i < 17; i++)
++		if (i % 3 == 2 ? addr[i] != ':' : !isxdigit((unsigned char) addr[i]))
++			return false;
++	return true;
++}
++
++static void
++bluetooth_toggle_device(struct bluetooth_state *bt, const char *addr,
++			bool connected)
++{
++	char cmd[96];
++
++	if (!bluetooth_addr_ok(addr))
++		return;
++	snprintf(cmd, sizeof cmd, HEXA_BLUETOOTH " %s %s",
++		 connected ? "disconnect" : "connect", addr);
++	run_command(cmd);
++	bluetooth_poll_in(bt, 3);
++}
++
++/* The Bluetooth rune, S tall from the center, as a path */
++static void
++draw_bluetooth_rune(cairo_t *cr, double cx, double cy, double s)
++{
++	double w = s * 0.5;
++
++	cairo_move_to(cr, cx - w, cy - w);
++	cairo_line_to(cr, cx + w, cy + w);
++	cairo_line_to(cr, cx, cy + s);
++	cairo_line_to(cr, cx, cy - s);
++	cairo_line_to(cr, cx + w, cy - w);
++	cairo_line_to(cr, cx - w, cy + w);
++}
++
++static void
++panel_bluetooth_redraw_handler(struct widget *widget, void *data)
++{
++	struct panel *panel = data;
++	struct bluetooth_state *bt = &panel->desktop->bluetooth;
++	struct rectangle a;
++	double cx, cy;
++	cairo_t *cr;
++
++	widget_get_allocation(widget, &a);
++	if (a.width == 0 || !bt->info.available)
++		return;
++
++	cr = widget_cairo_create(panel->widget);
++	draw_button_bg(cr, &a, panel->bluetooth_hover ? 0.10 : 0);
++	cx = a.x + a.width / 2.0;
++	cy = a.y + a.height / 2.0;
++	cairo_set_line_width(cr, 1.6);
++	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
++	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
++	/* dimmed when off */
++	cairo_set_source_rgba(cr, 1, 1, 1, bt->info.powered ? 0.95 : 0.38);
++	draw_bluetooth_rune(cr, cx - 1, cy, 8);
++	cairo_stroke(cr);
++	/* a dot when a device is connected */
++	if (bluetooth_connected_count(bt) > 0) {
++		cairo_set_source_rgb(cr, HEXA_CYAN);
++		cairo_arc(cr, cx + 7, cy + 6, 2.5, 0, 2 * M_PI);
++		cairo_fill(cr);
++	}
++	cairo_destroy(cr);
++}
++
++static int
++panel_bluetooth_enter_handler(struct widget *widget, struct input *input,
++			      float x, float y, void *data)
++{
++	struct panel *panel = data;
++
++	panel->bluetooth_hover = 1;
++	widget_schedule_redraw(widget);
++	return CURSOR_LEFT_PTR;
++}
++
++static void
++panel_bluetooth_leave_handler(struct widget *widget, struct input *input,
++			      void *data)
++{
++	struct panel *panel = data;
++
++	panel->bluetooth_hover = 0;
++	widget_destroy_tooltip(widget);
++	widget_schedule_redraw(widget);
++}
++
++static int
++panel_bluetooth_motion_handler(struct widget *widget, struct input *input,
++			       uint32_t time, float x, float y, void *data)
++{
++	struct panel *panel = data;
++	struct bluetooth_state *bt = &panel->desktop->bluetooth;
++	int i, n = bluetooth_connected_count(bt);
++
++	if (!bt->info.available)
++		return CURSOR_LEFT_PTR;
++	if (!bt->info.powered) {
++		snprintf(bt->tooltip, sizeof bt->tooltip, "Bluetooth: off");
++	} else if (n == 0) {
++		snprintf(bt->tooltip, sizeof bt->tooltip,
++			 "Bluetooth: on, nothing connected");
++	} else {
++		for (i = 0; !bt->info.devices[i].connected; i++)
++			;
++		if (n == 1)
++			snprintf(bt->tooltip, sizeof bt->tooltip,
++				 "Bluetooth: %s", bt->info.devices[i].name);
++		else
++			snprintf(bt->tooltip, sizeof bt->tooltip,
++				 "Bluetooth: %s and %d more",
++				 bt->info.devices[i].name, n - 1);
++	}
++	widget_set_tooltip(widget, bt->tooltip, x, y);
++	return CURSOR_LEFT_PTR;
++}
++
++static void
++panel_bluetooth_button_handler(struct widget *widget, struct input *input,
++			       uint32_t time, uint32_t button,
++			       enum wl_pointer_button_state state, void *data)
++{
++	struct panel *panel = data;
++	struct rectangle a;
++
++	widget_destroy_tooltip(widget);
++	popups_close(panel->desktop);
++	if ((button != BTN_LEFT && button != BTN_RIGHT) ||
++	    state != WL_POINTER_BUTTON_STATE_RELEASED ||
++	    !panel->desktop->bluetooth.info.available)
++		return;
++	widget_get_allocation(widget, &a);
++	context_menu_open(panel, CTX_FOR_BLUETOOTH, a.x, NULL, NULL);
++}
++
++static void
++panel_bluetooth_touch_down_handler(struct widget *widget, struct input *input,
++				   uint32_t serial, uint32_t time, int32_t id,
++				   float x, float y, void *data)
++{
++	struct panel *panel = data;
++	struct rectangle a;
++
++	if (!panel->desktop->bluetooth.info.available)
++		return;
++	widget_get_allocation(widget, &a);
++	context_menu_open(panel, CTX_FOR_BLUETOOTH, a.x, NULL, NULL);
++}
++
++/*
+  * Clock: time above, date below
+  */
+ 
+@@ -2224,6 +2584,35 @@
+ 		cairo_line_to(cr, x + size / 2, y + m);
+ 		cairo_line_to(cr, x + size / 2 - 3, y + m + 3);
+ 		break;
++	case CTX_BT_POWER:
++		/* the power symbol */
++		cairo_arc(cr, x + size / 2, y + size / 2 + 0.5, size / 2 - m,
++			  -M_PI / 2 + 0.7, -M_PI / 2 - 0.7 + 2 * M_PI);
++		cairo_move_to(cr, x + size / 2, y + m - 1.5);
++		cairo_line_to(cr, x + size / 2, y + size / 2);
++		break;
++	case CTX_BT_DEVICE:
++		cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
++		draw_bluetooth_rune(cr, x + size / 2, y + size / 2,
++				    size / 2 - m + 1);
++		break;
++	case CTX_BT_SETTINGS: {
++		/* a cog: a ring with eight teeth */
++		int i;
++
++		cairo_arc(cr, x + size / 2, y + size / 2, size / 2 - m - 1,
++			  0, 2 * M_PI);
++		for (i = 0; i < 8; i++) {
++			double t = i * M_PI / 4;
++			double r1 = size / 2 - m - 1, r2 = size / 2 - m + 2;
++
++			cairo_move_to(cr, x + size / 2 + r1 * cos(t),
++				      y + size / 2 + r1 * sin(t));
++			cairo_line_to(cr, x + size / 2 + r2 * cos(t),
++				      y + size / 2 + r2 * sin(t));
++		}
++		break;
++	}
+ 	default:
+ 		break;
+ 	}
+@@ -2277,7 +2666,10 @@
+ 		if (e->action == CTX_LAUNCH && e->item) {
+ 			draw_icon(cr, e->item->icon, gx, gy, 20, 1.0);
+ 		} else {
+-			cairo_set_source_rgba(cr, 1, 1, 1, alpha * 0.85);
++			if (e->checked)
++				cairo_set_source_rgba(cr, HEXA_CYAN, alpha);
++			else
++				cairo_set_source_rgba(cr, 1, 1, 1, alpha * 0.85);
+ 			draw_action_glyph(cr, e->action, gx, gy, 20);
+ 		}
+ 
+@@ -2436,6 +2828,19 @@
+ 				weston_desktop_shell_window_minimize(desktop->shell,
+ 								     win->id);
+ 		break;
++	case CTX_BT_POWER:
++		bluetooth_set_power(&desktop->bluetooth,
++				    !desktop->bluetooth.info.powered);
++		break;
++	case CTX_BT_DEVICE:
++		/* ctx is only marked as closing: its copies are still there */
++		bluetooth_toggle_device(&desktop->bluetooth,
++					ctx->bt_addr[e->arg],
++					ctx->bt_connected[e->arg]);
++		break;
++	case CTX_BT_SETTINGS:
++		run_command("exec hexa-settings bluetooth");
++		break;
+ 	}
+ }
+ 
+@@ -2550,6 +2955,41 @@
+ 		context_menu_add(ctx, "Show desktop", CTX_SHOW_DESKTOP, NULL,
+ 				 !wl_list_empty(&desktop->windows));
+ 		break;
++	case CTX_FOR_BLUETOOTH: {
++		struct bt_info *info = &desktop->bluetooth.info;
++		struct ctx_entry *e;
++		int i;
++
++		e = context_menu_add(ctx, info->powered ? "Turn Bluetooth off" :
++						      "Turn Bluetooth on",
++				     CTX_BT_POWER, NULL, true);
++		if (e)
++			e->checked = info->powered;
++		/* paired devices: a click connects or disconnects */
++		for (i = 0; info->powered && i < info->n_devices; i++) {
++			struct bt_device *d = &info->devices[i];
++
++			if (i == 0)
++				context_menu_separator(ctx);
++			snprintf(ctx->bt_addr[i], sizeof ctx->bt_addr[i], "%s",
++				 d->addr);
++			snprintf(ctx->bt_label[i], sizeof ctx->bt_label[i],
++				 d->connected ? "%s (connected)" : "%s",
++				 d->name);
++			ctx->bt_connected[i] = d->connected;
++			e = context_menu_add(ctx, ctx->bt_label[i],
++					     CTX_BT_DEVICE, NULL, true);
++			if (e) {
++				e->arg = i;
++				e->checked = d->connected;
++			}
++		}
++		context_menu_separator(ctx);
++		context_menu_add(ctx, info->powered && info->n_devices == 0 ?
++				 "Add a device..." : "Bluetooth settings",
++				 CTX_BT_SETTINGS, NULL, true);
++		break;
++	}
+ 	}
+ }
+ 
+@@ -2817,6 +3257,7 @@
+ 		}
+ 		widget_set_allocation(panel->tasks, 0, 0, 0, 0);
+ 		widget_set_allocation(panel->volume, 0, 0, 0, 0);
++		widget_set_allocation(panel->bluetooth, 0, 0, 0, 0);
+ 		if (panel->clock)
+ 			widget_set_allocation(panel->clock->widget, 0,
+ 					      height - PANEL_HEIGHT,
+@@ -2846,6 +3287,13 @@
+ 	} else {
+ 		widget_set_allocation(panel->volume, 0, 0, 0, 0);
+ 	}
++	if (panel->desktop->bluetooth.info.available) {
++		right -= BLUETOOTH_WIDTH;
++		widget_set_allocation(panel->bluetooth, right, 0,
++				      BLUETOOTH_WIDTH, height);
++	} else {
++		widget_set_allocation(panel->bluetooth, 0, 0, 0, 0);
++	}
+ 	right -= 8;
+ 
+ 	widget_set_allocation(panel->tasks, x, 0,
+@@ -2919,6 +3367,7 @@
+ 	widget_destroy(panel->start);
+ 	widget_destroy(panel->tasks);
+ 	widget_destroy(panel->volume);
++	widget_destroy(panel->bluetooth);
+ 	widget_destroy(panel->widget);
+ 	window_destroy(panel->window);
+ 
+@@ -2986,6 +3435,21 @@
+ 	widget_set_button_handler(panel->volume, panel_volume_button_handler);
+ 	widget_set_axis_handler(panel->volume, panel_volume_axis_handler);
+ 
++	/* Bluetooth (left of the volume) */
++	panel->bluetooth = widget_add_widget(panel->widget, panel);
++	widget_set_redraw_handler(panel->bluetooth,
++				  panel_bluetooth_redraw_handler);
++	widget_set_enter_handler(panel->bluetooth,
++				 panel_bluetooth_enter_handler);
++	widget_set_leave_handler(panel->bluetooth,
++				 panel_bluetooth_leave_handler);
++	widget_set_motion_handler(panel->bluetooth,
++				  panel_bluetooth_motion_handler);
++	widget_set_button_handler(panel->bluetooth,
++				  panel_bluetooth_button_handler);
++	widget_set_touch_down_handler(panel->bluetooth,
++				      panel_bluetooth_touch_down_handler);
++
+ 	/* Clock */
+ 	if (panel->clock_format != CLOCK_FORMAT_NONE)
+ 		panel_add_clock(panel);
+@@ -3976,6 +4440,8 @@
+ 	wl_list_init(&desktop.windows);
+ 	desktop.volume.desktop = &desktop;
+ 	desktop.volume.reader_fd = -1;
++	desktop.bluetooth.desktop = &desktop;
++	desktop.bluetooth.reader_fd = -1;
+ 
+ 	config_file = weston_config_get_name_from_env();
+ 	desktop.config = weston_config_parse(config_file);
+@@ -4013,6 +4479,11 @@
+ 		};
+ 		toytimer_arm(&desktop.volume.timer, &its);
+ 	}
++	/* Bluetooth: the same, through hexa-bluetooth */
++	bluetooth_read(&desktop.bluetooth);
++	toytimer_init(&desktop.bluetooth.timer, CLOCK_MONOTONIC,
++		      desktop.display, bluetooth_timer_func);
++	bluetooth_poll_in(&desktop.bluetooth, BT_POLL_SECONDS);
+ 	display_set_global_handler(desktop.display, global_handler);
+ 	display_set_global_handler_remove(desktop.display, global_handler_remove);
+ 
+@@ -4038,6 +4509,11 @@
+ 		kill(desktop.volume.reader_pid, SIGKILL);
+ 		close(desktop.volume.reader_fd);
+ 	}
++	toytimer_fini(&desktop.bluetooth.timer);
++	if (desktop.bluetooth.reader_pid > 0) {
++		kill(desktop.bluetooth.reader_pid, SIGKILL);
++		close(desktop.bluetooth.reader_fd);
++	}
+ 	grab_surface_destroy(&desktop);
+ 	desktop_destroy_outputs(&desktop);
+ 	{

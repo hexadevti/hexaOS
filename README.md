@@ -29,6 +29,8 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/bin/hexa-power              restart / shut down (Start menu): a window on the desktop, a text menu otherwise
   usr/bin/hexa-steam              Steam (Start menu): installs it from Flathub on the first click
   usr/bin/hexa-vpn                WireGuard VPN, e.g. Proton VPN (import, up, down, status)
+  usr/bin/hexa-bluetooth          Bluetooth for the taskbar and Settings (status, list, power, scan,
+                                  pair, connect, disconnect, remove)
   usr/bin/xdg-open                opens links: web -> Firefox, vscode:// -> VS Code (GitHub login),
                                   folders -> Files
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
@@ -102,8 +104,8 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Desktop                    | starts automatically (user `hexa`, password `hexa`)     |
 | Text login (root)          | Ctrl+Alt+F2 (root, no password) · back with Ctrl+Alt+F1 |
 | Boot menu                  | hold Esc during boot                                    |
-| Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key; right-click an app to pin it or remove it from the menu, right-click Start to restore removed apps), shortcuts, open windows (click shows / minimizes, middle click closes), volume (wheel changes, click mutes), clock |
-| Settings                   | Start menu (or `hexa-settings`): network, sound, display, wallpaper and taskbar, keyboard, mouse and touchpad, date and time, power, account, services, about; `hexa-settings-tui` in text mode |
+| Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key; right-click an app to pin it or remove it from the menu, right-click Start to restore removed apps), shortcuts, open windows (click shows / minimizes, middle click closes), Bluetooth (click: turn on/off, connect a paired device, settings; shown when the PC has Bluetooth), volume (wheel changes, click mutes), clock |
+| Settings                   | Start menu (or `hexa-settings`): network, Bluetooth (pair headphones, controllers...; devices that need a PIN code need `bluetoothctl`), sound, display, wallpaper and taskbar, keyboard, mouse and touchpad, date and time, power, account, services, about; `hexa-settings-tui` in text mode |
 | Setup (Wi-Fi network...)   | Start menu (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`, checks the internet by reaching Google, sets the screen scale (`SCALE=2` is 200%, applied when the desktop restarts); safe to run again |
 | Restart / shut down        | Start menu > Power (or `hexa-power`): Shut down, Restart or Restart desktop; no password needed (`hexa-power --text` for the text menu) |
 | Switch windows             | Alt+Tab (hold Alt, press Tab to move on, release Alt to pick); Super+Tab works too |
