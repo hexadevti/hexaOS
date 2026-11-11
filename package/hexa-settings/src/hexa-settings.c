@@ -2,8 +2,8 @@
  * hexa-settings: the hexaOS Settings app (GTK 3)
  *
  * Pages on the left, as in Windows 11: Network, Bluetooth, Sound, Display,
- * Personalization, Keyboard, Mouse & touchpad, Date & time, Power, Account,
- * Services and About. "hexa-settings PAGE" opens on one page (e.g. sound),
+ * Personalization, Default apps, Keyboard, Mouse & touchpad, Serial ports,
+ * Date & time, Power, Account, Services and About. "hexa-settings PAGE" opens on one page (e.g. sound),
  * also in a window that is already open;
  * "hexa-settings --set GROUP KEY VALUE" changes one desktop setting, no window.
  *
@@ -25,6 +25,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <math.h>
 #include <pwd.h>
@@ -36,6 +37,7 @@
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -3682,15 +3684,22 @@ defapps_refresh(void)
 
 	defapps.filling = TRUE;
 	gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(defapps.browser));
-	/* a fresh look at the app folders: browsers installed from the Store */
-	apps = g_app_info_get_all_for_type("x-scheme-handler/https");
+	/* a fresh look at the app folders: browsers installed from the Store.
+	 * Not g_app_info_get_all_for_type(): it only knows apps listed in a
+	 * mimeinfo.cache, which hexaOS has no update-desktop-database to write,
+	 * so it found none. Each app's own MimeType= line is read instead. */
+	apps = g_app_info_get_all();
 	def = g_app_info_get_default_for_type("x-scheme-handler/https", FALSE);
 	def_id = def ? g_app_info_get_id(def) : NULL;
 	for (a = apps; a; a = a->next) {
 		GAppInfo *app = a->data;
 		const char *id = g_app_info_get_id(app);
+		const char **types = g_app_info_get_supported_types(app);
 
 		if (!id || (!g_app_info_should_show(app) && g_strcmp0(id, def_id) != 0))
+			continue;
+		if (g_strcmp0(id, def_id) != 0 &&
+		    !(types && g_strv_contains(types, "x-scheme-handler/https")))
 			continue;
 		gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(defapps.browser), id,
 					  g_app_info_get_display_name(app));
@@ -3751,6 +3760,673 @@ build_defapps(void)
 }
 
 /*
+ * Serial ports (COM ports): USB serial adapters and boards (/dev/ttyUSB*,
+ * /dev/ttyACM*) and built-in ports (/dev/ttyS*). The speed and framing of each
+ * port are kept in ~/.config/hexaos/serial.ini (by its /dev/serial/by-id name,
+ * the same every time it is plugged in); "Open terminal" opens picocom with
+ * them, and they can also be set on the port itself for other programs.
+ */
+
+typedef struct {
+	int baud, data, stop;
+	char parity, flow;	/* n/e/o; n/h(RTS/CTS)/s(XON/XOFF) */
+} SerCfg;
+
+typedef struct {
+	char *name, *title, *info, *key, *user;
+} SerPort;
+
+static struct {
+	GtkWidget *access_sub, *access_btn, *drivers_sub, *list;
+	GKeyFile *ini;
+	char *ini_path, *shown;
+	guint timer;
+} ser;
+
+static const struct {
+	int baud;
+	speed_t speed;
+} ser_speeds[] = {
+	{ 300, B300 }, { 1200, B1200 }, { 2400, B2400 }, { 4800, B4800 },
+	{ 9600, B9600 }, { 19200, B19200 }, { 38400, B38400 }, { 57600, B57600 },
+	{ 115200, B115200 }, { 230400, B230400 }, { 460800, B460800 },
+	{ 921600, B921600 }, { 1000000, B1000000 }, { 2000000, B2000000 },
+};
+
+static void
+ser_port_free(gpointer p)
+{
+	SerPort *s = p;
+
+	g_free(s->name);
+	g_free(s->title);
+	g_free(s->info);
+	g_free(s->key);
+	g_free(s->user);
+	g_free(s);
+}
+
+static int
+ser_port_cmp(gconstpointer a, gconstpointer b)
+{
+	return g_strcmp0((*(SerPort *const *) a)->name, (*(SerPort *const *) b)->name);
+}
+
+/* A sysfs attribute (DIR/NAME), or NULL when missing or empty */
+static char *
+sys_attr(const char *dir, const char *name)
+{
+	char *path = g_build_filename(dir, name, NULL), *v = read_file(path);
+
+	g_free(path);
+	if (v && !*v) {
+		g_free(v);
+		v = NULL;
+	}
+	return v;
+}
+
+static void
+ser_cfg_get(const char *key, SerCfg *c)
+{
+	char *s;
+	int v;
+
+	*c = (SerCfg) { 115200, 8, 1, 'n', 'n' };
+	if ((v = g_key_file_get_integer(ser.ini, key, "baud", NULL)) > 0)
+		c->baud = v;
+	if ((v = g_key_file_get_integer(ser.ini, key, "data", NULL)) >= 5 && v <= 8)
+		c->data = v;
+	if ((v = g_key_file_get_integer(ser.ini, key, "stop", NULL)) == 1 || v == 2)
+		c->stop = v;
+	if ((s = g_key_file_get_string(ser.ini, key, "parity", NULL)) && strchr("neo", s[0]) && s[0])
+		c->parity = s[0];
+	g_free(s);
+	if ((s = g_key_file_get_string(ser.ini, key, "flow", NULL)) && strchr("nhs", s[0]) && s[0])
+		c->flow = s[0];
+	g_free(s);
+}
+
+/* "115200 8N1", plus the flow control when there is one */
+static char *
+ser_cfg_text(const SerCfg *c)
+{
+	return g_strdup_printf("%d %d%c%d%s", c->baud, c->data, g_ascii_toupper(c->parity), c->stop,
+			       c->flow == 'h' ? ", RTS/CTS" : c->flow == 's' ? ", XON/XOFF" : "");
+}
+
+/* /dev/serial/by-id name of a port (the same on every plug), or NULL */
+static char *
+ser_stable_name(const char *name)
+{
+	GDir *d = g_dir_open("/dev/serial/by-id", 0, NULL);
+	const char *e;
+	char *found = NULL;
+
+	while (d && !found && (e = g_dir_read_name(d))) {
+		char *link = g_build_filename("/dev/serial/by-id", e, NULL);
+		char *target = g_file_read_link(link, NULL);
+		char *base = target ? g_path_get_basename(target) : NULL;
+
+		if (base && strcmp(base, name) == 0)
+			found = g_strdup(e);
+		g_free(base);
+		g_free(target);
+		g_free(link);
+	}
+	if (d)
+		g_dir_close(d);
+	return found;
+}
+
+/* Serial ports open in the user's programs: "/dev/ttyUSB0" -> "picocom" */
+static GHashTable *
+ser_users(void)
+{
+	GHashTable *users = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+	DIR *d = opendir("/proc");
+	struct dirent *e;
+
+	while (d && (e = readdir(d))) {
+		char path[300], *comm = NULL;
+		GDir *fds;
+		const char *fd;
+
+		if (!isdigit((unsigned char) e->d_name[0]) || atoi(e->d_name) == getpid())
+			continue;
+		snprintf(path, sizeof path, "/proc/%s/fd", e->d_name);
+		if (!(fds = g_dir_open(path, 0, NULL)))
+			continue;
+		while ((fd = g_dir_read_name(fds))) {
+			char link[400], *target;
+
+			snprintf(link, sizeof link, "%s/%s", path, fd);
+			target = g_file_read_link(link, NULL);
+			if (target && g_str_has_prefix(target, "/dev/tty") &&
+			    !g_hash_table_contains(users, target)) {
+				if (!comm) {
+					snprintf(link, sizeof link, "/proc/%s/comm", e->d_name);
+					comm = read_file(link);
+				}
+				g_hash_table_insert(users, target, g_strdup(comm ? comm : "a program"));
+				target = NULL;
+			}
+			g_free(target);
+		}
+		g_dir_close(fds);
+		g_free(comm);
+	}
+	if (d)
+		closedir(d);
+	return users;
+}
+
+/* The serial ports there are now, by name */
+static GPtrArray *
+ser_ports(void)
+{
+	GPtrArray *ports = g_ptr_array_new_with_free_func(ser_port_free);
+	GHashTable *users = ser_users();
+	GDir *d = g_dir_open("/sys/class/tty", 0, NULL);
+	const char *n;
+
+	while (d && (n = g_dir_read_name(d))) {
+		gboolean usb = g_str_has_prefix(n, "ttyUSB") || g_str_has_prefix(n, "ttyACM");
+		char *cls, *dev, *link, *target, *driver = NULL, *usbdir = NULL;
+		char *product = NULL, *maker = NULL, *vid = NULL, *pid = NULL, *cfg_text, *devpath;
+		GString *info;
+		SerPort *p;
+		SerCfg c;
+
+		if (!usb && !g_str_has_prefix(n, "ttyS"))
+			continue;
+		cls = g_build_filename("/sys/class/tty", n, NULL);
+		if (!usb) {
+			/* the kernel lists ttyS0-3 even without the hardware (type 0) */
+			char *type = sys_attr(cls, "type");
+			gboolean real = type && strcmp(type, "0") != 0;
+
+			g_free(type);
+			if (!real) {
+				g_free(cls);
+				continue;
+			}
+		}
+		dev = g_build_filename(cls, "device", NULL);
+		link = g_build_filename(dev, "driver", NULL);
+		if ((target = g_file_read_link(link, NULL)))
+			driver = g_path_get_basename(target);
+		g_free(target);
+		g_free(link);
+		if (usb) {
+			/* the USB device is a few folders up from the port */
+			char *real = realpath(dev, NULL), *dir = real ? g_strdup(real) : NULL;
+			int i;
+
+			free(real);
+			for (i = 0; dir && i < 4 && !usbdir; i++) {
+				char *f = g_build_filename(dir, "idVendor", NULL), *up;
+
+				if (g_file_test(f, G_FILE_TEST_EXISTS))
+					usbdir = g_strdup(dir);
+				g_free(f);
+				up = g_path_get_dirname(dir);
+				g_free(dir);
+				dir = up;
+			}
+			g_free(dir);
+		}
+		if (usbdir) {
+			product = sys_attr(usbdir, "product");
+			maker = sys_attr(usbdir, "manufacturer");
+			vid = sys_attr(usbdir, "idVendor");
+			pid = sys_attr(usbdir, "idProduct");
+		}
+
+		p = g_new0(SerPort, 1);
+		p->name = g_strdup(n);
+		p->key = ser_stable_name(n);
+		if (!p->key)
+			p->key = g_strdup(n);
+		p->title = g_strdup(product ? product : usb ? "USB serial device" : "Built-in serial port");
+		devpath = g_strconcat("/dev/", n, NULL);
+		p->user = g_strdup(g_hash_table_lookup(users, devpath));
+		ser_cfg_get(p->key, &c);
+		cfg_text = ser_cfg_text(&c);
+		info = g_string_new(devpath);
+		if (maker)
+			g_string_append_printf(info, " · %s", maker);
+		if (vid && pid)
+			g_string_append_printf(info, " · USB %s:%s", vid, pid);
+		if (driver)
+			g_string_append_printf(info, " · driver %s", driver);
+		g_string_append_printf(info, " · %s", cfg_text);
+		if (p->user)
+			g_string_append_printf(info, " · in use by %s", p->user);
+		p->info = g_string_free(info, FALSE);
+		g_ptr_array_add(ports, p);
+
+		g_free(devpath);
+		g_free(cfg_text);
+		g_free(product);
+		g_free(maker);
+		g_free(vid);
+		g_free(pid);
+		g_free(usbdir);
+		g_free(driver);
+		g_free(dev);
+		g_free(cls);
+	}
+	if (d)
+		g_dir_close(d);
+	g_hash_table_destroy(users);
+	g_ptr_array_sort(ports, ser_port_cmp);
+	return ports;
+}
+
+/* Sets speed and framing on the port itself (for every program that uses it) */
+static gboolean
+ser_apply(const char *name, const SerCfg *c, char **err)
+{
+	char *dev = g_strconcat("/dev/", name, NULL);
+	speed_t speed = 0;
+	struct termios t;
+	int fd, i;
+
+	for (i = 0; i < (int) G_N_ELEMENTS(ser_speeds); i++)
+		if (ser_speeds[i].baud == c->baud)
+			speed = ser_speeds[i].speed;
+	if (!speed) {
+		*err = g_strdup_printf("%d is not a speed this port supports.", c->baud);
+		g_free(dev);
+		return FALSE;
+	}
+	fd = open(dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
+	g_free(dev);
+	if (fd < 0) {
+		*err = g_strdup(errno == EACCES ?
+			"No permission to use serial ports: use Allow on this page first." :
+			g_strerror(errno));
+		return FALSE;
+	}
+	if (tcgetattr(fd, &t) != 0) {
+		*err = g_strdup(g_strerror(errno));
+		close(fd);
+		return FALSE;
+	}
+	t.c_cflag &= ~(CSIZE | PARENB | PARODD | CSTOPB | CRTSCTS);
+	t.c_cflag |= (c->data == 5 ? CS5 : c->data == 6 ? CS6 : c->data == 7 ? CS7 : CS8) |
+		     CLOCAL | CREAD;
+	if (c->parity != 'n')
+		t.c_cflag |= PARENB | (c->parity == 'o' ? PARODD : 0);
+	if (c->stop == 2)
+		t.c_cflag |= CSTOPB;
+	if (c->flow == 'h')
+		t.c_cflag |= CRTSCTS;
+	t.c_iflag &= ~(IXON | IXOFF | IXANY);
+	if (c->flow == 's')
+		t.c_iflag |= IXON | IXOFF;
+	cfsetispeed(&t, speed);
+	cfsetospeed(&t, speed);
+	if (tcsetattr(fd, TCSANOW, &t) != 0) {
+		*err = g_strdup(g_strerror(errno));
+		close(fd);
+		return FALSE;
+	}
+	close(fd);
+	return TRUE;
+}
+
+static void ser_refresh(void);
+
+/* Drop-down list; ITEMS are id, label, id, label... */
+static GtkWidget *
+ser_combo(const char *const *items, const char *active)
+{
+	GtkWidget *c = gtk_combo_box_text_new();
+	int i;
+
+	for (i = 0; items[i] && items[i + 1]; i += 2)
+		gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(c), items[i], items[i + 1]);
+	if (!gtk_combo_box_set_active_id(GTK_COMBO_BOX(c), active))
+		gtk_combo_box_set_active(GTK_COMBO_BOX(c), 0);
+	return c;
+}
+
+static void
+on_ser_settings(GtkButton *b, gpointer data)
+{
+	/* copies: the list may be rebuilt while the dialog is open */
+	char *name = g_strdup(g_object_get_data(G_OBJECT(b), "name"));
+	char *key = g_strdup(g_object_get_data(G_OBJECT(b), "key"));
+	char *title = g_strdup_printf("/dev/%s settings", name), buf[16];
+	char par[2], flow[2];
+	GtkWidget *d, *box, *grid, *speed, *bits, *parity, *stop, *fc, *now;
+	SerCfg c;
+	int i;
+
+	ser_cfg_get(key, &c);
+	d = gtk_dialog_new_with_buttons(title, GTK_WINDOW(win),
+					GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+					"Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, NULL);
+	gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_ACCEPT);
+	box = gtk_dialog_get_content_area(GTK_DIALOG(d));
+	gtk_box_set_spacing(GTK_BOX(box), 12);
+	gtk_container_set_border_width(GTK_CONTAINER(box), 16);
+
+	speed = gtk_combo_box_text_new();
+	for (i = 0; i < (int) G_N_ELEMENTS(ser_speeds); i++) {
+		g_snprintf(buf, sizeof buf, "%d", ser_speeds[i].baud);
+		gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(speed), buf, buf);
+	}
+	g_snprintf(buf, sizeof buf, "%d", c.baud);
+	if (!gtk_combo_box_set_active_id(GTK_COMBO_BOX(speed), buf))
+		gtk_combo_box_set_active_id(GTK_COMBO_BOX(speed), "115200");
+	g_snprintf(buf, sizeof buf, "%d", c.data);
+	bits = ser_combo(ITEMS("8", "8", "7", "7", "6", "6", "5", "5"), buf);
+	par[0] = c.parity, par[1] = 0;
+	parity = ser_combo(ITEMS("n", "None", "e", "Even", "o", "Odd"), par);
+	g_snprintf(buf, sizeof buf, "%d", c.stop);
+	stop = ser_combo(ITEMS("1", "1", "2", "2"), buf);
+	flow[0] = c.flow, flow[1] = 0;
+	fc = ser_combo(ITEMS("n", "None", "h", "Hardware (RTS/CTS)", "s", "Software (XON/XOFF)"), flow);
+
+	grid = gtk_grid_new();
+	gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+	gtk_grid_set_column_spacing(GTK_GRID(grid), 16);
+	{
+		const char *labels[] = { "Speed (bits per second)", "Data bits", "Parity",
+					 "Stop bits", "Flow control" };
+		GtkWidget *controls[] = { speed, bits, parity, stop, fc };
+
+		for (i = 0; i < 5; i++) {
+			gtk_grid_attach(GTK_GRID(grid), label_new(labels[i], NULL), 0, i, 1, 1);
+			gtk_widget_set_hexpand(controls[i], TRUE);
+			gtk_grid_attach(GTK_GRID(grid), controls[i], 1, i, 1, 1);
+		}
+	}
+	gtk_box_pack_start(GTK_BOX(box), grid, FALSE, FALSE, 0);
+	now = gtk_check_button_new_with_label("Also set them on the port now, for other programs");
+	gtk_box_pack_start(GTK_BOX(box), now, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(box), label_new("Open terminal always uses these settings. "
+		"Setting them on the port opens it, which restarts some boards (Arduino). "
+		"They stay until the device is unplugged.", "hx-dim"), FALSE, FALSE, 0);
+	gtk_widget_show_all(d);
+
+	if (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_ACCEPT) {
+		GError *e = NULL;
+		char *err = NULL;
+
+		c.baud = atoi(gtk_combo_box_get_active_id(GTK_COMBO_BOX(speed)));
+		c.data = atoi(gtk_combo_box_get_active_id(GTK_COMBO_BOX(bits)));
+		c.parity = gtk_combo_box_get_active_id(GTK_COMBO_BOX(parity))[0];
+		c.stop = atoi(gtk_combo_box_get_active_id(GTK_COMBO_BOX(stop)));
+		c.flow = gtk_combo_box_get_active_id(GTK_COMBO_BOX(fc))[0];
+		g_key_file_set_integer(ser.ini, key, "baud", c.baud);
+		g_key_file_set_integer(ser.ini, key, "data", c.data);
+		par[0] = c.parity, flow[0] = c.flow;
+		g_key_file_set_string(ser.ini, key, "parity", par);
+		g_key_file_set_integer(ser.ini, key, "stop", c.stop);
+		g_key_file_set_string(ser.ini, key, "flow", flow);
+		g_mkdir_with_parents(conf_dir, 0755);
+		if (!g_key_file_save_to_file(ser.ini, ser.ini_path, &e)) {
+			message(GTK_MESSAGE_ERROR, "Could not save the port settings", e->message);
+			g_error_free(e);
+		}
+		if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(now)) && !ser_apply(name, &c, &err)) {
+			message(GTK_MESSAGE_ERROR, "Could not set them on the port", err);
+			g_free(err);
+		}
+		gtk_widget_destroy(d);
+		d = NULL;
+		g_free(ser.shown);
+		ser.shown = NULL;
+		ser_refresh();
+	}
+	g_free(name);
+	g_free(key);
+	g_free(title);
+	if (d)
+		gtk_widget_destroy(d);
+}
+
+static void
+on_ser_terminal(GtkButton *b, gpointer data)
+{
+	const char *user = g_object_get_data(G_OBJECT(b), "user");
+	char *name = g_strdup(g_object_get_data(G_OBJECT(b), "name"));
+	char *key = g_strdup(g_object_get_data(G_OBJECT(b), "key"));
+	char *dev = g_strconcat("/dev/", name, NULL), *title, *prog, *text;
+	char baud[16], bits[4], par[2], stop[4], flow[2];
+	GError *e = NULL;
+	SerCfg c;
+
+	if (!(prog = g_find_program_in_path("picocom"))) {
+		message(GTK_MESSAGE_ERROR, "The serial terminal (picocom) is not installed", NULL);
+		goto out;
+	}
+	g_free(prog);
+	if (access(dev, R_OK | W_OK) != 0) {
+		message(GTK_MESSAGE_WARNING, "No permission to use serial ports",
+			"Use Allow under Permission on this page first.");
+		goto out;
+	}
+	if (user) {
+		text = g_strdup_printf("%s is using %s. When two programs read the same port, "
+				       "each one gets only part of the data.", user, dev);
+		if (!confirm("This port is already in use", text, "Open anyway")) {
+			g_free(text);
+			goto out;
+		}
+		g_free(text);
+	}
+	ser_cfg_get(key, &c);
+	g_snprintf(baud, sizeof baud, "%d", c.baud);
+	g_snprintf(bits, sizeof bits, "%d", c.data);
+	g_snprintf(stop, sizeof stop, "%d", c.stop);
+	par[0] = c.parity, par[1] = 0;
+	flow[0] = c.flow, flow[1] = 0;
+	title = g_strdup_printf("Serial %s", dev);
+	/* the window stays open after picocom ends, so its messages can be read */
+	if (!g_spawn_async(NULL, (char **) ARGV("foot", "--app-id=hexa-serial", "--title", title,
+			"sh", "-c", "picocom \"$@\"; printf '\\nPress Enter to close this window.'; read x",
+			"sh", "-b", baud, "-d", bits, "-y", par, "-p", stop, "-f", flow, dev),
+			NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &e)) {
+		message(GTK_MESSAGE_ERROR, "Could not open the terminal", e->message);
+		g_error_free(e);
+	}
+	g_free(title);
+out:
+	g_free(dev);
+	g_free(name);
+	g_free(key);
+}
+
+static GtkWidget *
+ser_button(const char *label, GCallback cb, const SerPort *p)
+{
+	GtkWidget *b = button_new(label, cb, NULL);
+
+	g_object_set_data_full(G_OBJECT(b), "name", g_strdup(p->name), g_free);
+	g_object_set_data_full(G_OBJECT(b), "key", g_strdup(p->key), g_free);
+	g_object_set_data_full(G_OBJECT(b), "user", g_strdup(p->user), g_free);
+	return b;
+}
+
+/* Rebuilds the port list when something changed (plugged, unplugged, in use) */
+static void
+ser_refresh(void)
+{
+	GPtrArray *ports = ser_ports();
+	GString *sig = g_string_new(NULL);
+	guint i;
+
+	for (i = 0; i < ports->len; i++) {
+		SerPort *p = ports->pdata[i];
+
+		g_string_append_printf(sig, "%s|%s|%s\n", p->name, p->title, p->info);
+	}
+	if (ser.shown && strcmp(ser.shown, sig->str) == 0) {
+		g_string_free(sig, TRUE);
+		g_ptr_array_free(ports, TRUE);
+		return;
+	}
+	g_free(ser.shown);
+	ser.shown = g_string_free(sig, FALSE);
+
+	list_clear(ser.list);
+	for (i = 0; i < ports->len; i++) {
+		SerPort *p = ports->pdata[i];
+		GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+
+		gtk_box_pack_start(GTK_BOX(box),
+			ser_button("Port settings", G_CALLBACK(on_ser_settings), p), FALSE, FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(box),
+			ser_button("Open terminal", G_CALLBACK(on_ser_terminal), p), FALSE, FALSE, 0);
+		add_row(ser.list, p->title, p->info, box, NULL);
+	}
+	if (ports->len == 0)
+		add_row(ser.list, "No serial ports found",
+			"Plug in a USB serial adapter or a board (Arduino, ESP32, Raspberry Pi Pico...): "
+			"it shows up here by itself.", NULL, NULL);
+	gtk_widget_show_all(ser.list);
+	g_ptr_array_free(ports, TRUE);
+}
+
+static gboolean
+in_group_now(gid_t gid)
+{
+	gid_t groups[256];
+	int n = getgroups(G_N_ELEMENTS(groups), groups), i;
+
+	if (getegid() == gid)
+		return TRUE;
+	for (i = 0; i < n; i++)
+		if (groups[i] == gid)
+			return TRUE;
+	return FALSE;
+}
+
+/* Permission: serial ports belong to the dialout group */
+static void
+ser_access_refresh(void)
+{
+	struct group *gr = getgrnam("dialout");
+	gboolean now = getuid() == 0, listed = FALSE;
+	struct passwd *pw;
+	char **m;
+
+	if (gr) {
+		gid_t gid = gr->gr_gid;
+		char **members = g_strdupv(gr->gr_mem);
+
+		now = now || in_group_now(gid);
+		if ((pw = getpwuid(getuid())))
+			for (m = members; *m; m++)
+				if (strcmp(*m, pw->pw_name) == 0)
+					listed = TRUE;
+		g_strfreev(members);
+	}
+	if (now) {
+		set_sub(ser.access_sub, "Your programs can use serial ports.");
+		gtk_widget_hide(ser.access_btn);
+		return;
+	}
+	if (listed) {
+		set_sub(ser.access_sub, "Allowed: restart the desktop to apply it (open windows will close).");
+		gtk_button_set_label(GTK_BUTTON(ser.access_btn), "Restart desktop");
+		g_object_set_data(G_OBJECT(ser.access_btn), "restart", GINT_TO_POINTER(1));
+	} else {
+		set_sub(ser.access_sub, "Not allowed yet: programs cannot open serial ports.");
+		gtk_button_set_label(GTK_BUTTON(ser.access_btn), "Allow");
+		g_object_set_data(G_OBJECT(ser.access_btn), "restart", NULL);
+	}
+	gtk_widget_show(ser.access_btn);
+}
+
+static void
+ser_access_done(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	admin_report(ok, out, err, "Could not allow serial ports");
+	ser_access_refresh();
+}
+
+static void
+on_ser_access(GtkButton *b, gpointer data)
+{
+	if (g_object_get_data(G_OBJECT(b), "restart")) {
+		if (confirm("Restart the desktop?", "Open windows will close.", "Restart desktop"))
+			restart_desktop();
+		return;
+	}
+	as_admin(ARGV("serial-access"), NULL, ser_access_done, NULL);
+}
+
+static void
+ser_drivers_refresh(void)
+{
+	struct utsname u;
+	char *dir;
+	gboolean ok;
+
+	uname(&u);
+	dir = g_strdup_printf("/lib/modules/%s/kernel/drivers/usb/serial", u.release);
+	ok = g_file_test(dir, G_FILE_TEST_IS_DIR) || g_file_test("/sys/bus/usb-serial", G_FILE_TEST_IS_DIR);
+	g_free(dir);
+	set_sub(ser.drivers_sub, ok ?
+		"Loaded by themselves when a device is plugged in: CDC-ACM (Arduino, Raspberry Pi "
+		"Pico, ESP32...), FTDI, CH340/CH341, CP210x and PL2303." :
+		"This version of hexaOS has no USB serial drivers: update hexaOS.");
+}
+
+static gboolean
+ser_tick(gpointer data)
+{
+	const char *visible = gtk_stack_get_visible_child_name(GTK_STACK(stack));
+
+	if (!visible || strcmp(visible, "serial") != 0) {
+		ser.timer = 0;
+		return G_SOURCE_REMOVE;
+	}
+	ser_refresh();
+	return G_SOURCE_CONTINUE;
+}
+
+static void
+serial_shown(void)
+{
+	g_free(ser.shown);
+	ser.shown = NULL;
+	ser_access_refresh();
+	ser_drivers_refresh();
+	ser_refresh();
+	if (!ser.timer)	/* plugged and unplugged devices show up by themselves */
+		ser.timer = g_timeout_add_seconds(2, ser_tick, NULL);
+}
+
+static GtkWidget *
+build_serial(void)
+{
+	GtkWidget *page = page_new("Serial ports",
+		"COM ports: USB serial adapters, boards such as Arduino and ESP32, and built-in "
+		"ports. Open terminal talks to the device (picocom: press Ctrl+A, then Ctrl+X, "
+		"to leave)."), *list;
+
+	ser.ini = g_key_file_new();
+	ser.ini_path = g_build_filename(conf_dir, "serial.ini", NULL);
+	g_key_file_load_from_file(ser.ini, ser.ini_path, G_KEY_FILE_NONE, NULL);
+
+	list = section(NULL);
+	ser.access_btn = button_new("Allow", G_CALLBACK(on_ser_access), NULL);
+	gtk_widget_set_no_show_all(ser.access_btn, TRUE);
+	add_row(list, "Permission", NULL, ser.access_btn, &ser.access_sub);
+	add_row(list, "USB adapters", NULL, NULL, &ser.drivers_sub);
+
+	ser.list = section("Ports");
+	return page;
+}
+
+/*
  * Window
  */
 
@@ -3768,6 +4444,7 @@ static const struct {
 	{ "apps", "Default apps", "applications-internet-symbolic", build_defapps, defapps_refresh },
 	{ "keyboard", "Keyboard", "input-keyboard-symbolic", build_keyboard, NULL },
 	{ "mouse", "Mouse & touchpad", "input-mouse-symbolic", build_mouse, NULL },
+	{ "serial", "Serial ports", "utilities-terminal-symbolic", build_serial, serial_shown },
 	{ "time", "Date & time", "preferences-system-time-symbolic", build_time, time_shown },
 	{ "power", "Power", "system-shutdown-symbolic", build_power, NULL },
 	{ "account", "Account", "avatar-default-symbolic", build_account, NULL },

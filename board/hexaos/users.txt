@@ -1,4 +1,4 @@
 # user uid group gid password home shell extra-groups comment
 # Initial password: hexa  (change it with "passwd" inside the system)
 # uid 1000: same as the default user of most distros (hexa-dev containers)
-hexa 1000 hexa 1000 =hexa /home/hexa /bin/bash video,input,audio,netdev,docker,wheel hexaOS user
+hexa 1000 hexa 1000 =hexa /home/hexa /bin/bash video,input,audio,netdev,docker,wheel,dialout hexaOS user

@@ -11,6 +11,7 @@
 #   docker-boot on|off        start Docker when the computer starts
 #   wired-restart             reconnect the wired network
 #   brightness DEVICE VALUE   when /sys/class/backlight is not writable
+#   serial-access             lets the calling user use serial (COM) ports
 
 set -u
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -84,6 +85,14 @@ brightness)
     case "$value" in ""|*[!0-9]*) die "Invalid value: $value" ;; esac
     [ -w "/sys/class/backlight/$dev/brightness" ] || die "No such screen: $dev"
     echo "$value" > "/sys/class/backlight/$dev/brightness"
+    ;;
+serial-access)
+    # /dev/ttyUSB*, /dev/ttyACM* and /dev/ttyS* belong to the dialout group
+    user=${SUDO_USER:-}
+    [ -n "$user" ] && [ "$user" != root ] || die "Run from Settings (through sudo)."
+    grep -q '^dialout:' /etc/group || addgroup -S dialout || die "Could not create the dialout group."
+    id -nG "$user" | tr ' ' '\n' | grep -qx dialout ||
+        addgroup "$user" dialout || die "Could not add $user to the dialout group."
     ;;
 *)
     die "Unknown command: $verb"
