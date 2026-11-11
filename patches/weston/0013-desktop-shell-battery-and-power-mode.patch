@@ -1,0 +1,769 @@
+desktop-shell: battery and power mode on the taskbar
+
+Left of the clock: the battery and its level on a laptop (cyan while
+charging, a bolt on the charger, red at 10% or less on battery); on a
+computer without a battery, a gauge showing the power mode. Hidden when
+there is neither a battery nor a power mode to choose. The tooltip says
+the level, the time left (or until full) and the power mode.
+
+A click opens a menu: the battery level, the power modes (Power saver,
+Balanced, Best performance; the current one highlighted), "Power
+settings" (Settings, on its Power page) and "Shut down or restart..."
+(hexa-power).
+
+The battery comes from /sys/class/power_supply (batteries of peripherals,
+scope "Device", are left out), read every few seconds; the power mode is
+set by "hexa-power-mode set MODE" and read back from
+/etc/hexaos/power-mode. The modes offered follow the same rules as
+hexa-power-mode: all three with a platform profile or a CPU energy
+preference, otherwise the ones the cpufreq governors allow.
+
+--- a/clients/desktop-shell.c
++++ b/clients/desktop-shell.c
+@@ -44,6 +44,7 @@
+ #include <time.h>
+ #include <assert.h>
+ #include <sys/stat.h>
++#include <dirent.h>
+ 
+ #include <wayland-client.h>
+ 
+@@ -72,6 +73,8 @@
+ #define TASK_GAP		4
+ #define VOLUME_WIDTH		64
+ #define BLUETOOTH_WIDTH		36
++#define POWER_WIDTH		36	/* power mode only (no battery) */
++#define BATTERY_WIDTH		72	/* battery and its level */
+ #define CLOCK_WIDTH		92
+ #define ICON_SIZE		24
+ #define MENU_WIDTH		300
+@@ -85,6 +88,12 @@
+ #define HEXA_BLUETOOTH		"/usr/bin/hexa-bluetooth"
+ #define BT_POLL_SECONDS		5
+ #define BT_MAX_DEVICES		6
++#define HEXA_POWER_MODE		"/usr/bin/hexa-power-mode"
++#define POWER_MODE_FILE		"/etc/hexaos/power-mode"
++#define POWER_SUPPLY_DIR	"/sys/class/power_supply"
++#define CPUFREQ_DIR		"/sys/devices/system/cpu/cpu0/cpufreq"
++#define PLATFORM_PROFILE	"/sys/firmware/acpi/platform_profile"
++#define POWER_POLL_SECONDS	10
+ 
+ /* hexaOS palette (see board/hexaos/art/common.ps) */
+ #define HEXA_CYAN	0.133, 0.827, 0.933
+@@ -158,6 +167,33 @@ struct bt_info {
+ 	struct bt_device devices[BT_MAX_DEVICES];
+ };
+ 
++/* Power modes, as hexa-power-mode names them */
++enum power_mode {
++	POWER_SAVER,
++	POWER_BALANCED,
++	POWER_PERFORMANCE,
++	POWER_N_MODES
++};
++
++/* Battery and power mode (compared whole to spot changes) */
++struct power_info {
++	bool battery;		/* there is a battery: show its level */
++	int percent;
++	bool charging;
++	bool plugged;		/* on the charger (charging or not) */
++	int minutes;		/* until empty, or full while charging; -1 */
++	bool has_mode[POWER_N_MODES];	/* modes this computer can use */
++	int n_modes;
++	enum power_mode mode;
++};
++
++struct power_state {
++	struct desktop *desktop;
++	struct power_info info;
++	struct toytimer timer;
++	char tooltip[160];
++};
++
+ struct bluetooth_state {
+ 	struct desktop *desktop;
+ 	struct bt_info info;
+@@ -216,6 +252,12 @@ enum ctx_action {
+ 	CTX_BT_POWER,		/* turn Bluetooth on or off */
+ 	CTX_BT_DEVICE,		/* connect/disconnect context_menu::bt_addr[arg] */
+ 	CTX_BT_SETTINGS,	/* Settings, on the Bluetooth page */
++	CTX_POWER_INFO,		/* battery level (not clickable) */
++	CTX_POWER_SAVER,	/* power modes */
++	CTX_POWER_BALANCED,
++	CTX_POWER_PERFORMANCE,
++	CTX_POWER_SETTINGS,	/* Settings, on the Power page */
++	CTX_POWER_OFF,		/* the power window: shut down, restart */
+ };
+ 
+ #define CTX_MAX_ENTRIES		12
+@@ -247,6 +289,7 @@ struct context_menu {
+ 	char bt_addr[BT_MAX_DEVICES][18];
+ 	char bt_label[BT_MAX_DEVICES][96];
+ 	bool bt_connected[BT_MAX_DEVICES];
++	char power_label[96];	/* CTX_POWER_INFO */
+ };
+ 
+ struct desktop {
+@@ -286,6 +329,7 @@ struct desktop {
+ 	int ctx_pending_x, ctx_pending_y;
+ 	struct volume_state volume;
+ 	struct bluetooth_state bluetooth;
++	struct power_state power;
+ };
+ 
+ struct surface {
+@@ -323,6 +367,9 @@ struct panel {
+ 	struct widget *bluetooth;
+ 	int bluetooth_hover;
+ 
++	struct widget *power;
++	int power_hover;
++
+ 	struct panel_clock *clock;
+ 	int painted;
+ 	enum weston_desktop_shell_panel_position panel_position;
+@@ -397,6 +444,7 @@ enum ctx_kind {
+ 	CTX_FOR_TASKBAR,	/* an empty part of the taskbar */
+ 	CTX_FOR_START_ITEM,	/* an app in the Start menu */
+ 	CTX_FOR_BLUETOOTH,	/* the Bluetooth icon */
++	CTX_FOR_POWER,		/* the battery / power mode icon */
+ };
+ 
+ static void
+@@ -1839,6 +1887,462 @@ panel_bluetooth_touch_down_handler(struct widget *widget, struct input *input,
+ 	context_menu_open(panel, CTX_FOR_BLUETOOTH, a.x, NULL, NULL);
+ }
+ 
++/*
++ * Battery (/sys/class/power_supply) and power mode (hexa-power-mode)
++ */
++
++static const char *const power_mode_names[POWER_N_MODES] = {
++	"saver", "balanced", "performance"
++};
++static const char *const power_mode_labels[POWER_N_MODES] = {
++	"Power saver", "Balanced", "Best performance"
++};
++
++/* First line of a small sysfs (or config) file, without the newline */
++static bool
++read_line(const char *path, char *buf, size_t size)
++{
++	FILE *f = fopen(path, "re");
++	bool ok;
++
++	if (!f)
++		return false;
++	ok = fgets(buf, size, f) != NULL;
++	fclose(f);
++	if (ok)
++		buf[strcspn(buf, "\n")] = '\0';
++	return ok;
++}
++
++static bool
++supply_read(const char *supply, const char *name, char *buf, size_t size)
++{
++	char path[256];
++
++	snprintf(path, sizeof path, POWER_SUPPLY_DIR "/%s/%s", supply, name);
++	return read_line(path, buf, size);
++}
++
++static long
++supply_read_long(const char *supply, const char *name, long def)
++{
++	char buf[32];
++
++	if (!supply_read(supply, name, buf, sizeof buf))
++		return def;
++	return strtol(buf, NULL, 10);
++}
++
++/* WORD is one of the space-separated words of the file */
++static bool
++file_has_word(const char *path, const char *word)
++{
++	char buf[512], *w, *save = NULL;
++
++	if (!read_line(path, buf, sizeof buf))
++		return false;
++	for (w = strtok_r(buf, " ", &save); w; w = strtok_r(NULL, " ", &save))
++		if (strcmp(w, word) == 0)
++			return true;
++	return false;
++}
++
++/* Which modes the computer can use: the same rules as hexa-power-mode */
++static void
++power_read_modes(struct power_info *info)
++{
++	const char *gov = CPUFREQ_DIR "/scaling_available_governors";
++	char buf[32];
++	int i;
++
++	if (access(PLATFORM_PROFILE, F_OK) == 0 ||
++	    access(CPUFREQ_DIR "/energy_performance_preference", F_OK) == 0) {
++		for (i = 0; i < POWER_N_MODES; i++)
++			info->has_mode[i] = true;
++	} else {
++		info->has_mode[POWER_SAVER] = file_has_word(gov, "powersave");
++		info->has_mode[POWER_BALANCED] =
++			file_has_word(gov, "schedutil") ||
++			file_has_word(gov, "ondemand") ||
++			file_has_word(gov, "conservative");
++		info->has_mode[POWER_PERFORMANCE] =
++			file_has_word(gov, "performance");
++	}
++	for (i = 0; i < POWER_N_MODES; i++)
++		if (info->has_mode[i])
++			info->n_modes++;
++
++	info->mode = POWER_BALANCED;
++	if (read_line(POWER_MODE_FILE, buf, sizeof buf))
++		for (i = 0; i < POWER_N_MODES; i++)
++			if (strcmp(buf, power_mode_names[i]) == 0)
++				info->mode = i;
++}
++
++/* The computer's batteries (not a mouse's) added up, and the charger */
++static void
++power_read_battery(struct power_info *info)
++{
++	long now_sum = 0, full_sum = 0, rate_sum = 0, cap_sum = 0;
++	int n = 0, n_cap = 0;
++	bool discharging = false;
++	struct dirent *de;
++	DIR *dir;
++
++	info->minutes = -1;
++	dir = opendir(POWER_SUPPLY_DIR);
++	if (!dir)
++		return;
++	while ((de = readdir(dir))) {
++		const char *name = de->d_name;
++		char type[32], buf[32];
++		long now, full, rate;
++
++		if (name[0] == '.' || !supply_read(name, "type", type, sizeof type))
++			continue;
++		/* peripherals (mouse, gamepad) say scope "Device" */
++		if (supply_read(name, "scope", buf, sizeof buf) &&
++		    strcmp(buf, "Device") == 0)
++			continue;
++		if (strcmp(type, "Battery") != 0) {
++			/* Mains, USB (USB-C chargers)... */
++			if (supply_read_long(name, "online", 0) > 0)
++				info->plugged = true;
++			continue;
++		}
++		if (supply_read_long(name, "present", 1) == 0)
++			continue;
++
++		n++;
++		if (supply_read(name, "status", buf, sizeof buf)) {
++			if (strcmp(buf, "Charging") == 0)
++				info->charging = true;
++			else if (strcmp(buf, "Discharging") == 0)
++				discharging = true;
++			else if (strcmp(buf, "Full") == 0 ||
++				 strcmp(buf, "Not charging") == 0)
++				info->plugged = true;
++		}
++		if ((now = supply_read_long(name, "capacity", -1)) >= 0) {
++			cap_sum += now;
++			n_cap++;
++		}
++		/* energy (uWh, uW) or charge (uAh, uA), depending on the
++		 * firmware */
++		now = supply_read_long(name, "energy_now", -1);
++		if (now >= 0) {
++			full = supply_read_long(name, "energy_full", 0);
++			rate = supply_read_long(name, "power_now", 0);
++		} else {
++			now = supply_read_long(name, "charge_now", -1);
++			full = supply_read_long(name, "charge_full", 0);
++			rate = supply_read_long(name, "current_now", 0);
++		}
++		if (now >= 0 && full > 0) {
++			now_sum += now;
++			full_sum += full;
++			rate_sum += labs(rate);
++		}
++	}
++	closedir(dir);
++
++	if (n == 0)
++		return;
++	info->battery = true;
++	if (info->charging)
++		info->plugged = true;
++	if (n == 1 && n_cap == 1)
++		info->percent = cap_sum;
++	else if (full_sum > 0)
++		info->percent = (int) ((now_sum * 100 + full_sum / 2) / full_sum);
++	else if (n_cap > 0)
++		info->percent = cap_sum / n_cap;
++	if (info->percent > 100)
++		info->percent = 100;
++
++	if (rate_sum > 0 && full_sum > 0) {
++		long left = info->charging ? full_sum - now_sum :
++			    discharging ? now_sum : -1;
++
++		if (left >= 0)
++			info->minutes = (int) (left * 60 / rate_sum);
++		/* the first readings after a change are often silly */
++		if (info->minutes > 48 * 60)
++			info->minutes = -1;
++	}
++}
++
++static void
++power_read(struct power_state *ps)
++{
++	struct power_info info;
++
++	memset(&info, 0, sizeof info);
++	power_read_battery(&info);
++	power_read_modes(&info);
++	if (memcmp(&info, &ps->info, sizeof info) != 0) {
++		ps->info = info;
++		panels_update(ps->desktop);
++	}
++}
++
++static void
++power_timer_func(struct toytimer *tt)
++{
++	power_read(container_of(tt, struct power_state, timer));
++}
++
++/* Reads again in SECONDS (after a change), then as usual */
++static void
++power_poll_in(struct power_state *ps, int seconds)
++{
++	struct itimerspec its = {
++		.it_interval = { .tv_sec = POWER_POLL_SECONDS },
++		.it_value = { .tv_sec = seconds },
++	};
++
++	toytimer_arm(&ps->timer, &its);
++}
++
++static void
++power_set_mode(struct power_state *ps, enum power_mode mode)
++{
++	char cmd[96];
++
++	if (mode >= POWER_N_MODES || !ps->info.has_mode[mode])
++		return;
++	snprintf(cmd, sizeof cmd, HEXA_POWER_MODE " set %s",
++		 power_mode_names[mode]);
++	run_command(cmd);
++	/* show it right away; the next reading confirms it */
++	ps->info.mode = mode;
++	panels_update(ps->desktop);
++	power_poll_in(ps, 2);
++}
++
++static int
++power_width(struct desktop *desktop)
++{
++	struct power_info *info = &desktop->power.info;
++
++	if (info->battery)
++		return BATTERY_WIDTH;
++	return info->n_modes > 0 ? POWER_WIDTH : 0;
++}
++
++/* "2 h 05 min", "40 min" */
++static void
++format_minutes(char *buf, size_t size, int minutes)
++{
++	if (minutes >= 60)
++		snprintf(buf, size, "%d h %02d min", minutes / 60, minutes % 60);
++	else
++		snprintf(buf, size, "%d min", minutes);
++}
++
++/* "79% - 3 h 10 min left", "45% - charging", "100% - plugged in" */
++static void
++power_battery_text(struct power_info *info, char *buf, size_t size)
++{
++	char t[32];
++
++	if (info->minutes >= 0)
++		format_minutes(t, sizeof t, info->minutes);
++	if (info->charging && info->minutes >= 0)
++		snprintf(buf, size, "%d%% - charging, full in %s",
++			 info->percent, t);
++	else if (info->charging)
++		snprintf(buf, size, "%d%% - charging", info->percent);
++	else if (info->plugged)
++		snprintf(buf, size, "%d%% - plugged in", info->percent);
++	else if (info->minutes >= 0)
++		snprintf(buf, size, "%d%% - %s left", info->percent, t);
++	else
++		snprintf(buf, size, "%d%% - on battery", info->percent);
++}
++
++/* A battery W wide, from X, centered on CY, filled to PERCENT */
++static void
++draw_battery(cairo_t *cr, double x, double cy, double w, int percent,
++	     bool charging, bool plugged, double alpha)
++{
++	double h = w * 0.5, fill;
++	bool low = percent <= 10 && !plugged;
++
++	cairo_save(cr);
++	cairo_set_line_width(cr, 1.4);
++	cairo_set_source_rgba(cr, 1, 1, 1, alpha);
++	path_rounded_rect(cr, x + 0.7, cy - h / 2, w - 3, h, 2);
++	cairo_stroke(cr);
++	/* the terminal */
++	cairo_rectangle(cr, x + w - 2, cy - h / 4, 2, h / 2);
++	cairo_fill(cr);
++
++	fill = (w - 3 - 4) * (percent < 0 ? 0 : percent > 100 ? 100 : percent) / 100.0;
++	if (fill > 0) {
++		if (low)
++			cairo_set_source_rgba(cr, 0.937, 0.267, 0.267, alpha);
++		else if (charging)
++			cairo_set_source_rgba(cr, HEXA_CYAN, alpha);
++		cairo_rectangle(cr, x + 2.7, cy - h / 2 + 2, fill, h - 4);
++		cairo_fill(cr);
++	}
++
++	/* a lightning bolt on the charger */
++	if (plugged) {
++		double bx = x + (w - 3) / 2 + 0.7, s = h * 0.62;
++
++		cairo_move_to(cr, bx + s * 0.25, cy - s);
++		cairo_line_to(cr, bx - s * 0.45, cy + s * 0.12);
++		cairo_line_to(cr, bx - s * 0.02, cy + s * 0.12);
++		cairo_line_to(cr, bx - s * 0.25, cy + s);
++		cairo_line_to(cr, bx + s * 0.45, cy - s * 0.12);
++		cairo_line_to(cr, bx + s * 0.02, cy - s * 0.12);
++		cairo_close_path(cr);
++		cairo_set_source_rgba(cr, 1, 1, 1, alpha);
++		cairo_fill_preserve(cr);
++		cairo_set_source_rgb(cr, HEXA_BG);
++		cairo_set_line_width(cr, 1);
++		cairo_stroke(cr);
++	}
++	cairo_restore(cr);
++}
++
++/* A gauge of radius R centered on (CX, CY) with its needle on MODE */
++static void
++draw_gauge(cairo_t *cr, double cx, double cy, double r, enum power_mode mode)
++{
++	static const double needle[POWER_N_MODES] = {
++		M_PI + 0.55, 1.5 * M_PI, 2 * M_PI - 0.55
++	};
++	double t = needle[mode < POWER_N_MODES ? mode : POWER_BALANCED];
++
++	cairo_new_sub_path(cr);
++	cairo_arc(cr, cx, cy, r, M_PI - 0.25, 2 * M_PI + 0.25);
++	cairo_move_to(cr, cx, cy);
++	cairo_line_to(cr, cx + r * 0.72 * cos(t), cy + r * 0.72 * sin(t));
++}
++
++static void
++panel_power_redraw_handler(struct widget *widget, void *data)
++{
++	struct panel *panel = data;
++	struct power_info *info = &panel->desktop->power.info;
++	struct rectangle a;
++	char text[16];
++	double cy;
++	cairo_t *cr;
++
++	widget_get_allocation(widget, &a);
++	if (a.width == 0)
++		return;
++
++	cr = widget_cairo_create(panel->widget);
++	draw_button_bg(cr, &a, panel->power_hover ? 0.10 : 0);
++	cy = a.y + a.height / 2.0;
++	if (info->battery) {
++		draw_battery(cr, a.x + 8, cy, 24, info->percent,
++			     info->charging, info->plugged, 0.95);
++		snprintf(text, sizeof text, "%d%%", info->percent);
++		set_font(cr, 12, false);
++		cairo_set_source_rgba(cr, 1, 1, 1, 0.85);
++		cairo_move_to(cr, a.x + 37, cy + 4.5);
++		cairo_show_text(cr, text);
++	} else {
++		cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
++		cairo_set_line_width(cr, 1.6);
++		cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
++		draw_gauge(cr, a.x + a.width / 2.0, cy + 3, 8, info->mode);
++		cairo_stroke(cr);
++	}
++	cairo_destroy(cr);
++}
++
++static int
++panel_power_enter_handler(struct widget *widget, struct input *input,
++			  float x, float y, void *data)
++{
++	struct panel *panel = data;
++
++	panel->power_hover = 1;
++	widget_schedule_redraw(widget);
++	return CURSOR_LEFT_PTR;
++}
++
++static void
++panel_power_leave_handler(struct widget *widget, struct input *input,
++			  void *data)
++{
++	struct panel *panel = data;
++
++	panel->power_hover = 0;
++	widget_destroy_tooltip(widget);
++	widget_schedule_redraw(widget);
++}
++
++static int
++panel_power_motion_handler(struct widget *widget, struct input *input,
++			   uint32_t time, float x, float y, void *data)
++{
++	struct panel *panel = data;
++	struct power_state *ps = &panel->desktop->power;
++	struct power_info *info = &ps->info;
++	const char *mode = power_mode_labels[info->mode];
++	char battery[96];
++
++	if (power_width(panel->desktop) == 0)
++		return CURSOR_LEFT_PTR;
++	if (info->battery) {
++		power_battery_text(info, battery, sizeof battery);
++		if (info->n_modes > 0)
++			snprintf(ps->tooltip, sizeof ps->tooltip,
++				 "Battery %s (%s)", battery, mode);
++		else
++			snprintf(ps->tooltip, sizeof ps->tooltip,
++				 "Battery %s", battery);
++	} else {
++		snprintf(ps->tooltip, sizeof ps->tooltip, "Power mode: %s",
++			 mode);
++	}
++	widget_set_tooltip(widget, ps->tooltip, x, y);
++	return CURSOR_LEFT_PTR;
++}
++
++static void
++panel_power_button_handler(struct widget *widget, struct input *input,
++			   uint32_t time, uint32_t button,
++			   enum wl_pointer_button_state state, void *data)
++{
++	struct panel *panel = data;
++	struct rectangle a;
++
++	widget_destroy_tooltip(widget);
++	popups_close(panel->desktop);
++	if ((button != BTN_LEFT && button != BTN_RIGHT) ||
++	    state != WL_POINTER_BUTTON_STATE_RELEASED ||
++	    power_width(panel->desktop) == 0)
++		return;
++	/* fresh numbers in the menu */
++	power_read(&panel->desktop->power);
++	widget_get_allocation(widget, &a);
++	context_menu_open(panel, CTX_FOR_POWER, a.x, NULL, NULL);
++}
++
++static void
++panel_power_touch_down_handler(struct widget *widget, struct input *input,
++			       uint32_t serial, uint32_t time, int32_t id,
++			       float x, float y, void *data)
++{
++	struct panel *panel = data;
++	struct rectangle a;
++
++	if (power_width(panel->desktop) == 0)
++		return;
++	power_read(&panel->desktop->power);
++	widget_get_allocation(widget, &a);
++	context_menu_open(panel, CTX_FOR_POWER, a.x, NULL, NULL);
++}
++
+ /*
+  * Clock: time above, date below
+  */
+@@ -2585,6 +3089,7 @@ draw_action_glyph(cairo_t *cr, enum ctx_action action, double x, double y,
+ 		cairo_line_to(cr, x + size / 2 - 3, y + m + 3);
+ 		break;
+ 	case CTX_BT_POWER:
++	case CTX_POWER_OFF:
+ 		/* the power symbol */
+ 		cairo_arc(cr, x + size / 2, y + size / 2 + 0.5, size / 2 - m,
+ 			  -M_PI / 2 + 0.7, -M_PI / 2 - 0.7 + 2 * M_PI);
+@@ -2596,7 +3101,19 @@ draw_action_glyph(cairo_t *cr, enum ctx_action action, double x, double y,
+ 		draw_bluetooth_rune(cr, x + size / 2, y + size / 2,
+ 				    size / 2 - m + 1);
+ 		break;
+-	case CTX_BT_SETTINGS: {
++	case CTX_POWER_INFO:
++		cairo_restore(cr);
++		draw_battery(cr, x + 1, y + size / 2, size - 2, 100, false,
++			     false, 0.85);
++		return;
++	case CTX_POWER_SAVER:
++	case CTX_POWER_BALANCED:
++	case CTX_POWER_PERFORMANCE:
++		draw_gauge(cr, x + size / 2, y + size / 2 + 3, size / 2 - m + 2,
++			   POWER_SAVER + (action - CTX_POWER_SAVER));
++		break;
++	case CTX_BT_SETTINGS:
++	case CTX_POWER_SETTINGS: {
+ 		/* a cog: a ring with eight teeth */
+ 		int i;
+ 
+@@ -2644,7 +3161,9 @@ context_menu_redraw_handler(struct widget *widget, void *data)
+ 	set_font(cr, 13.5, false);
+ 	for (i = 0; i < ctx->count; i++) {
+ 		struct ctx_entry *e = &ctx->entries[i];
+-		double alpha = e->enabled ? 0.92 : 0.35;
++		/* the battery level is not clickable, but no less legible */
++		double alpha = e->enabled || e->action == CTX_POWER_INFO ?
++			       0.92 : 0.35;
+ 		double gx = MENU_PAD + 8;
+ 		double gy = e->y + (CTX_ITEM_HEIGHT - 20) / 2.0;
+ 
+@@ -2841,6 +3360,20 @@ context_menu_activate(struct context_menu *ctx, int index)
+ 	case CTX_BT_SETTINGS:
+ 		run_command("exec hexa-settings bluetooth");
+ 		break;
++	case CTX_POWER_INFO:
++		break;
++	case CTX_POWER_SAVER:
++	case CTX_POWER_BALANCED:
++	case CTX_POWER_PERFORMANCE:
++		power_set_mode(&desktop->power,
++			       POWER_SAVER + (e->action - CTX_POWER_SAVER));
++		break;
++	case CTX_POWER_SETTINGS:
++		run_command("exec hexa-settings power");
++		break;
++	case CTX_POWER_OFF:
++		run_command("exec hexa-power");
++		break;
+ 	}
+ }
+ 
+@@ -2990,6 +3523,35 @@ context_menu_fill(struct context_menu *ctx, enum ctx_kind kind,
+ 				 CTX_BT_SETTINGS, NULL, true);
+ 		break;
+ 	}
++	case CTX_FOR_POWER: {
++		struct power_info *info = &desktop->power.info;
++		struct ctx_entry *e;
++		int i;
++
++		/* the battery level, then the power modes */
++		if (info->battery) {
++			power_battery_text(info, ctx->power_label,
++					   sizeof ctx->power_label);
++			context_menu_add(ctx, ctx->power_label,
++					 CTX_POWER_INFO, NULL, false);
++			if (info->n_modes > 0)
++				context_menu_separator(ctx);
++		}
++		for (i = 0; i < POWER_N_MODES; i++) {
++			if (!info->has_mode[i])
++				continue;
++			e = context_menu_add(ctx, power_mode_labels[i],
++					     CTX_POWER_SAVER + i, NULL, true);
++			if (e)
++				e->checked = info->mode == (enum power_mode) i;
++		}
++		context_menu_separator(ctx);
++		context_menu_add(ctx, "Power settings", CTX_POWER_SETTINGS,
++				 NULL, true);
++		context_menu_add(ctx, "Shut down or restart...",
++				 CTX_POWER_OFF, NULL, true);
++		break;
++	}
+ 	}
+ }
+ 
+@@ -3258,6 +3820,7 @@ panel_layout(struct panel *panel)
+ 		widget_set_allocation(panel->tasks, 0, 0, 0, 0);
+ 		widget_set_allocation(panel->volume, 0, 0, 0, 0);
+ 		widget_set_allocation(panel->bluetooth, 0, 0, 0, 0);
++		widget_set_allocation(panel->power, 0, 0, 0, 0);
+ 		if (panel->clock)
+ 			widget_set_allocation(panel->clock->widget, 0,
+ 					      height - PANEL_HEIGHT,
+@@ -3280,6 +3843,13 @@ panel_layout(struct panel *panel)
+ 		widget_set_allocation(panel->clock->widget, right, 0,
+ 				      CLOCK_WIDTH, height);
+ 	}
++	if (power_width(panel->desktop) > 0) {
++		right -= power_width(panel->desktop);
++		widget_set_allocation(panel->power, right, 0,
++				      power_width(panel->desktop), height);
++	} else {
++		widget_set_allocation(panel->power, 0, 0, 0, 0);
++	}
+ 	if (panel->desktop->volume.available) {
+ 		right -= VOLUME_WIDTH;
+ 		widget_set_allocation(panel->volume, right, 0,
+@@ -3368,6 +3938,7 @@ panel_destroy(struct panel *panel)
+ 	widget_destroy(panel->tasks);
+ 	widget_destroy(panel->volume);
+ 	widget_destroy(panel->bluetooth);
++	widget_destroy(panel->power);
+ 	widget_destroy(panel->widget);
+ 	window_destroy(panel->window);
+ 
+@@ -3450,6 +4021,16 @@ panel_create(struct desktop *desktop, struct output *output)
+ 	widget_set_touch_down_handler(panel->bluetooth,
+ 				      panel_bluetooth_touch_down_handler);
+ 
++	/* Battery and power mode (left of the clock) */
++	panel->power = widget_add_widget(panel->widget, panel);
++	widget_set_redraw_handler(panel->power, panel_power_redraw_handler);
++	widget_set_enter_handler(panel->power, panel_power_enter_handler);
++	widget_set_leave_handler(panel->power, panel_power_leave_handler);
++	widget_set_motion_handler(panel->power, panel_power_motion_handler);
++	widget_set_button_handler(panel->power, panel_power_button_handler);
++	widget_set_touch_down_handler(panel->power,
++				      panel_power_touch_down_handler);
++
+ 	/* Clock */
+ 	if (panel->clock_format != CLOCK_FORMAT_NONE)
+ 		panel_add_clock(panel);
+@@ -4442,6 +5023,7 @@ int main(int argc, char *argv[])
+ 	desktop.volume.reader_fd = -1;
+ 	desktop.bluetooth.desktop = &desktop;
+ 	desktop.bluetooth.reader_fd = -1;
++	desktop.power.desktop = &desktop;
+ 
+ 	config_file = weston_config_get_name_from_env();
+ 	desktop.config = weston_config_parse(config_file);
+@@ -4484,6 +5066,12 @@ int main(int argc, char *argv[])
+ 	toytimer_init(&desktop.bluetooth.timer, CLOCK_MONOTONIC,
+ 		      desktop.display, bluetooth_timer_func);
+ 	bluetooth_poll_in(&desktop.bluetooth, BT_POLL_SECONDS);
++	/* Battery and power mode: sysfs is quick to read, no need for a
++	 * helper in the background */
++	power_read(&desktop.power);
++	toytimer_init(&desktop.power.timer, CLOCK_MONOTONIC,
++		      desktop.display, power_timer_func);
++	power_poll_in(&desktop.power, POWER_POLL_SECONDS);
+ 	display_set_global_handler(desktop.display, global_handler);
+ 	display_set_global_handler_remove(desktop.display, global_handler_remove);
+ 
+@@ -4510,6 +5098,7 @@ int main(int argc, char *argv[])
+ 		close(desktop.volume.reader_fd);
+ 	}
+ 	toytimer_fini(&desktop.bluetooth.timer);
++	toytimer_fini(&desktop.power.timer);
+ 	if (desktop.bluetooth.reader_pid > 0) {
+ 		kill(desktop.bluetooth.reader_pid, SIGKILL);
+ 		close(desktop.bluetooth.reader_fd);

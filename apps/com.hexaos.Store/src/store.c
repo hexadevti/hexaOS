@@ -10,7 +10,9 @@
  * (permission --talk-name=org.freedesktop.Flatpak), always with --user.
  *
  * Start menu entries are [launcher] blocks in ~/.config/hexaos/apps.ini, one
- * per app, separated by blank lines and marked with "app-id=ID". hexa-session
+ * per app, separated by blank lines and marked with "# app: ID" (older ones by
+ * "app-id=ID"); their app-id= is the app's StartupWMClass, so the taskbar gives
+ * the entry's icon to its windows. hexa-session
  * adds that file to the desktop config at login; apps/hexa-launcher writes the
  * same format. Their icons are PNG copies in ~/.config/hexaos/icons/, because
  * the taskbar reads PNG only.
@@ -447,9 +449,11 @@ ini_blocks(void)
 static gboolean
 block_is(const char *block, const char *id)
 {
+	char *mark = g_strdup_printf("\n# app: %s\n", id);
 	char *key = g_strdup_printf("\napp-id=%s\n", id), *b = g_strconcat("\n", block, NULL);
-	gboolean is = strstr(b, key) != NULL;
+	gboolean is = strstr(b, mark) != NULL || strstr(b, key) != NULL;
 
+	g_free(mark);
 	g_free(key);
 	g_free(b);
 	return is;
@@ -542,6 +546,31 @@ desktop_name(const char *id, const char *fallback)
 	return name;
 }
 
+/*
+ * App id of the app's windows, which the taskbar matches with app-id= to give
+ * them the entry's icon: StartupWMClass of its .desktop file when it has one
+ * (Chrome's windows are "google-chrome", VS Code's "code"), else the Flatpak id
+ */
+static char *
+window_app_id(const char *id)
+{
+	char *file = g_strdup_printf("%s/applications/%s.desktop", exports, id);
+	GKeyFile *kf = g_key_file_new();
+	char *wm = NULL;
+
+	if (g_key_file_load_from_file(kf, file, G_KEY_FILE_NONE, NULL))
+		wm = g_key_file_get_string(kf, "Desktop Entry", "StartupWMClass", NULL);
+	g_key_file_free(kf);
+	g_free(file);
+	if (wm)
+		g_strstrip(wm);
+	if (!wm || !*wm || strpbrk(wm, "\r\n")) {
+		g_free(wm);
+		wm = g_strdup(id);
+	}
+	return wm;
+}
+
 /* Writes a PNG of the app's icon for the taskbar; its path, or the generic icon */
 static char *
 launcher_icon(const char *id)
@@ -565,20 +594,22 @@ static void
 add_launcher(const char *id, const char *fallback_name)
 {
 	GPtrArray *blocks;
-	char *name, *icon;
+	char *name, *icon, *win_id;
 
 	remove_launcher(id);
 	blocks = ini_blocks();
 	name = desktop_name(id, fallback_name);
 	icon = launcher_icon(id);
+	win_id = window_app_id(id);
 	g_ptr_array_add(blocks, g_strdup_printf("# app: %s\n[launcher]\ndisplayname=%s\n"
 						"icon=%s\npath=/usr/bin/flatpak run %s\n"
-						"app-id=%s\nfolder=%s\n", id, name, icon, id, id,
+						"app-id=%s\nfolder=%s\n", id, name, icon, id, win_id,
 						MENU_FOLDER));
 	ini_save(blocks);
 	show_restart_bar();
 	g_free(name);
 	g_free(icon);
+	g_free(win_id);
 	g_ptr_array_free(blocks, TRUE);
 }
 

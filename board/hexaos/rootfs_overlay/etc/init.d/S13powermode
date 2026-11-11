@@ -1,0 +1,15 @@
+#!/bin/sh
+# Applies the power mode chosen on the taskbar or in Settings > Power
+# (saved in /etc/hexaos/power-mode by hexa-power-mode).
+
+case "$1" in
+    start|restart|reload)
+        /usr/bin/hexa-power-mode restore
+        ;;
+    stop)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

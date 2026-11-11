@@ -24,9 +24,10 @@ mkdir -p "$CONF"
     "# Added to the desktop config at login by hexa-session." > "$INI"
 
 # Each entry is one block of lines, blocks separated by a blank line:
-# drop the block that has "app-id=$id"
+# drop the block marked "# app: $id" (older ones: that has "app-id=$id")
 tmp=$(mktemp)
 awk -v id="$id" 'BEGIN { RS = ""; ORS = "\n\n" }
+    index("\n" $0 "\n", "\n# app: " id "\n") == 0 &&
     index("\n" $0 "\n", "\napp-id=" id "\n") == 0' "$INI" > "$tmp"
 mv "$tmp" "$INI"
 
@@ -34,9 +35,14 @@ mv "$tmp" "$INI"
 
 desktop="$EXPORTS/applications/$id.desktop"
 name=$id
+# App id of its windows, which the taskbar matches with app-id= to give them
+# this icon: StartupWMClass when the app has one (Chrome: google-chrome)
+win_id=$id
 if [ -f "$desktop" ]; then
     n=$(sed -n '/^\[Desktop Entry\]/,/^\[/{s/^Name=//p}' "$desktop" | head -n 1)
     [ -n "$n" ] && name=$n
+    w=$(sed -n '/^\[Desktop Entry\]/,/^\[/{s/^StartupWMClass=//p}' "$desktop" | head -n 1 | tr -d '[:space:]')
+    [ -n "$w" ] && win_id=$w
 fi
 
 # Biggest PNG icon the app exports (Weston scales it down), else the one in
@@ -57,7 +63,7 @@ cat >> "$INI" <<EOF
 displayname=$name
 icon=$icon
 path=/usr/bin/flatpak run $id
-app-id=$id
+app-id=$win_id
 folder=$FOLDER
 
 EOF

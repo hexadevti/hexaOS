@@ -30,6 +30,8 @@ board/hexaos/rootfs_overlay/      files copied into the system
   usr/bin/hexa-vpn                WireGuard VPN, e.g. Proton VPN (import, up, down, status)
   usr/bin/hexa-bluetooth          Bluetooth for the taskbar and Settings (status, list, power, scan,
                                   pair, connect, disconnect, remove)
+  usr/bin/hexa-power-mode         power mode (Power saver, Balanced, Best performance) for the
+                                  taskbar and Settings; kept across restarts
   usr/bin/xdg-open                opens links: web -> the default browser (Settings > Default apps;
                                   Firefox if none), other links (vscode://...) -> the app that registered them, folders -> Files
   usr/lib/hexaos/wifi.sh          Wi-Fi helpers and failure diagnosis (Settings and Setup)
@@ -38,7 +40,8 @@ board/hexaos/rootfs_overlay/      files copied into the system
   etc/init.d/S40iwd               iwd with its messages in /var/log/messages
   etc/init.d/S02growfs            grows the root partition on first boot
   etc/init.d/S12speakers          creates the speaker amplifiers ACPI does not declare
-  etc/sudoers.d/power             restart/shut down without a password (wheel group)
+  etc/init.d/S13powermode         applies the saved power mode at start
+  etc/sudoers.d/power             restart/shut down and change the power mode without a password (wheel group)
   etc/xdg/weston/weston.ini       taskbar, Start menu apps, wallpaper, keyboard layout
   etc/xdg/mimeapps.list           default apps for links (with usr/share/applications/*.desktop)
 package/hexa-wine/                64-bit Wine with WoW64 (Wayland driver)
@@ -63,7 +66,8 @@ patches/                          tweaks to Buildroot packages (splash colors; W
                                   the screen they were last on, else on the main screen,
                                   window list for the Task Manager's Apps tab, windows too big
                                   for their screen are maximized, the main screen comes first
-                                  and the others are placed around it)
+                                  and the others are placed around it, battery and power mode
+                                  next to the clock)
 scripts/build.sh                  builds the system
 scripts/run-qemu.sh               runs it in QEMU (window or --serial)
 scripts/smoke-test.sh             automated test with screenshots
@@ -106,8 +110,8 @@ To regenerate the logo and wallpaper (on Windows, with Ghostscript installed):
 | Desktop                    | starts automatically (user `hexa`, password `hexa`)     |
 | Text login (root)          | Ctrl+Alt+F2 (root, no password) · back with Ctrl+Alt+F1 |
 | Boot menu                  | hold Esc during boot                                    |
-| Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key; right-click an app to pin it or remove it from the menu, right-click Start to restore removed apps), shortcuts, open windows (click shows / minimizes, middle click closes), Bluetooth (click: turn on/off, connect a paired device, settings; shown when the PC has Bluetooth), volume (wheel changes, click mutes), clock |
-| Settings                   | Start menu (or `hexa-settings`): network, Bluetooth (pair headphones, controllers...; devices that need a PIN code need `bluetoothctl`), sound, display, wallpaper and taskbar, keyboard, mouse and touchpad, serial (COM) ports (USB serial adapters, Arduino, ESP32...: permission, port settings and a terminal), date and time, power, account, services, about, default apps (web browser); the Sound page tests the microphone, the Display page picks the main screen and where the others are; `hexa-settings-tui` in text mode |
+| Taskbar                    | at the bottom: Start menu (hexaOS button or the Super key; right-click an app to pin it or remove it from the menu, right-click Start to restore removed apps), shortcuts, open windows (click shows / minimizes, middle click closes), Bluetooth (click: turn on/off, connect a paired device, settings; shown when the PC has Bluetooth), volume (wheel changes, click mutes), battery level (or power mode, without a battery; click: power mode, power settings, shut down), clock |
+| Settings                   | Start menu (or `hexa-settings`): network, Bluetooth (pair headphones, controllers...; devices that need a PIN code need `bluetoothctl`), sound, display, wallpaper and taskbar, keyboard, mouse and touchpad, serial (COM) ports (USB serial adapters, Arduino, ESP32...: permission, port settings and a terminal), date and time, power (battery level and health, power mode, screen off), account, services, about, default apps (web browser); the Sound page tests the microphone, the Display page picks the main screen and where the others are; `hexa-settings-tui` in text mode |
 | Setup (Wi-Fi network...)   | Start menu (or `hexa-setup`): joins the Wi-Fi network from `etc/hexaos/setup.conf`, checks the internet by reaching Google, sets the screen scale (`SCALE=2` is 200%, applied when the desktop restarts); safe to run again |
 | Restart / shut down        | Start menu > Power (or `hexa-power`): Shut down, Restart or Restart desktop; no password needed (`hexa-power --text` for the text menu) |
 | Switch windows             | Alt+Tab (hold Alt, press Tab to move on, release Alt to pick); Super+Tab works too |

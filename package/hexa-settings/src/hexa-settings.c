@@ -3159,10 +3159,302 @@ on_restart_desktop(GtkButton *b, gpointer data)
 	restart_desktop();
 }
 
+/* Battery: the computer's batteries (not a mouse's) in /sys/class/power_supply,
+ * added up; the taskbar shows the same (Weston desktop-shell patch) */
+
+#define POWER_SUPPLY	"/sys/class/power_supply"
+#define POWER_MODE	"/usr/bin/hexa-power-mode"
+
+typedef struct {
+	int n;			/* batteries found */
+	int percent;
+	gboolean charging, discharging, plugged;
+	int minutes;		/* until empty, or full while charging; -1 */
+	int health;		/* % of the design capacity; -1 */
+	int cycles;		/* charge cycles; -1 */
+} Battery;
+
+static struct {
+	GtkWidget *level, *percent, *status, *health_row, *health;
+	GtkWidget *mode, *mode_sub;
+	gboolean filling;	/* filling the mode list: not a choice */
+	guint timer;
+} pw;
+
+static char *
+supply_value(const char *supply, const char *name)
+{
+	char *path = g_build_filename(POWER_SUPPLY, supply, name, NULL);
+	char *v = read_file(path);
+
+	g_free(path);
+	return v;
+}
+
+static long
+supply_long(const char *supply, const char *name, long def)
+{
+	char *v = supply_value(supply, name);
+	long n = v && *v ? strtol(v, NULL, 10) : def;
+
+	g_free(v);
+	return n;
+}
+
+static void
+battery_read(Battery *b)
+{
+	long now_sum = 0, full_sum = 0, design_sum = 0, rate_sum = 0, cap_sum = 0;
+	int n_cap = 0;
+	const char *name;
+	GDir *dir;
+
+	memset(b, 0, sizeof *b);
+	b->minutes = b->health = b->cycles = -1;
+	dir = g_dir_open(POWER_SUPPLY, 0, NULL);
+	if (!dir)
+		return;
+	while ((name = g_dir_read_name(dir))) {
+		char *type = supply_value(name, "type"), *scope = supply_value(name, "scope");
+		char *status;
+		gboolean device = scope && strcmp(scope, "Device") == 0;
+		long now, full, design, rate;
+
+		if (!type || device || strcmp(type, "Battery") != 0) {
+			/* chargers: Mains, USB (USB-C) */
+			if (type && !device && supply_long(name, "online", 0) > 0)
+				b->plugged = TRUE;
+			g_free(type);
+			g_free(scope);
+			continue;
+		}
+		g_free(type);
+		g_free(scope);
+		if (supply_long(name, "present", 1) == 0)
+			continue;
+
+		b->n++;
+		status = supply_value(name, "status");
+		if (g_strcmp0(status, "Charging") == 0)
+			b->charging = TRUE;
+		else if (g_strcmp0(status, "Discharging") == 0)
+			b->discharging = TRUE;
+		else if (g_strcmp0(status, "Full") == 0 || g_strcmp0(status, "Not charging") == 0)
+			b->plugged = TRUE;
+		g_free(status);
+		if ((now = supply_long(name, "capacity", -1)) >= 0) {
+			cap_sum += now;
+			n_cap++;
+		}
+		if ((now = supply_long(name, "cycle_count", -1)) > 0)
+			b->cycles = MAX(b->cycles, (int) now);
+		/* energy (uWh, uW) or charge (uAh, uA), depending on the firmware */
+		now = supply_long(name, "energy_now", -1);
+		if (now >= 0) {
+			full = supply_long(name, "energy_full", 0);
+			design = supply_long(name, "energy_full_design", 0);
+			rate = supply_long(name, "power_now", 0);
+		} else {
+			now = supply_long(name, "charge_now", -1);
+			full = supply_long(name, "charge_full", 0);
+			design = supply_long(name, "charge_full_design", 0);
+			rate = supply_long(name, "current_now", 0);
+		}
+		if (now >= 0 && full > 0) {
+			now_sum += now;
+			full_sum += full;
+			design_sum += design;
+			rate_sum += labs(rate);
+		}
+	}
+	g_dir_close(dir);
+
+	if (b->n == 0)
+		return;
+	if (b->charging)
+		b->plugged = TRUE;
+	if (b->n == 1 && n_cap == 1)
+		b->percent = cap_sum;
+	else if (full_sum > 0)
+		b->percent = (int) ((now_sum * 100 + full_sum / 2) / full_sum);
+	else if (n_cap > 0)
+		b->percent = cap_sum / n_cap;
+	b->percent = CLAMP(b->percent, 0, 100);
+	if (design_sum > 0 && full_sum > 0)
+		b->health = (int) MIN(100, (full_sum * 100 + design_sum / 2) / design_sum);
+	if (rate_sum > 0 && full_sum > 0) {
+		long left = b->charging ? full_sum - now_sum : b->discharging ? now_sum : -1;
+
+		if (left >= 0 && left * 60 / rate_sum <= 48 * 60)
+			b->minutes = (int) (left * 60 / rate_sum);
+	}
+}
+
+/* "2 h 05 min", "40 min" (a new string) */
+static char *
+minutes_text(int minutes)
+{
+	if (minutes >= 60)
+		return g_strdup_printf("%d h %02d min", minutes / 60, minutes % 60);
+	return g_strdup_printf("%d min", minutes);
+}
+
+static gboolean
+battery_refresh(gpointer data)
+{
+	Battery b;
+	char *t, *text;
+
+	battery_read(&b);
+	if (b.n == 0)
+		return G_SOURCE_CONTINUE;
+	gtk_level_bar_set_value(GTK_LEVEL_BAR(pw.level), b.percent);
+	t = g_strdup_printf("%d%%", b.percent);
+	gtk_label_set_text(GTK_LABEL(pw.percent), t);
+	g_free(t);
+
+	t = b.minutes >= 0 ? minutes_text(b.minutes) : NULL;
+	if (b.charging)
+		text = t ? g_strdup_printf("Charging: full in %s.", t) : g_strdup("Charging.");
+	else if (b.plugged)
+		text = g_strdup(b.percent >= 95 ? "Plugged in, charged." :
+				"Plugged in, not charging (the battery may be kept below "
+				"full to last longer).");
+	else
+		text = t ? g_strdup_printf("On battery: %s left.", t) : g_strdup("On battery.");
+	set_sub(pw.status, text);
+	g_free(text);
+	g_free(t);
+
+	if (b.health >= 0 || b.cycles > 0) {
+		char *h = b.health >= 0 ? g_strdup_printf("%d%% of its original capacity", b.health) :
+			  g_strdup("");
+		text = b.cycles > 0 ? g_strdup_printf("%s%s%d charge cycles", h, *h ? ", " : "",
+						      b.cycles) : g_strdup(h);
+		gtk_label_set_text(GTK_LABEL(pw.health), text);
+		gtk_widget_show(pw.health_row);
+		g_free(text);
+		g_free(h);
+	}
+	return G_SOURCE_CONTINUE;
+}
+
+static void
+power_shown(void)
+{
+	if (pw.level)
+		battery_refresh(NULL);
+}
+
+/* Power mode, through hexa-power-mode */
+
+static const char *
+power_mode_note(const char *mode)
+{
+	if (g_strcmp0(mode, "saver") == 0)
+		return "Longer battery life and a cooler, quieter computer; programs may be slower.";
+	if (g_strcmp0(mode, "performance") == 0)
+		return "The fastest the computer can go: more heat, fan noise and battery use.";
+	return "Fast when needed, saves energy when idle. Recommended.";
+}
+
+static void
+power_mode_read_done(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	static const char *const labels[] = {
+		"saver", "Power saver", "balanced", "Balanced", "performance", "Best performance",
+	};
+	char *mode = text_value(out, "mode"), *modes = text_value(out, "modes");
+	char *padded = g_strdup_printf(" %s ", modes ? modes : "");
+	int i, n = 0;
+
+	pw.filling = TRUE;
+	gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(pw.mode));
+	for (i = 0; i < (int) G_N_ELEMENTS(labels); i += 2) {
+		char *word = g_strdup_printf(" %s ", labels[i]);
+
+		if (strstr(padded, word)) {
+			gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(pw.mode), labels[i],
+						  labels[i + 1]);
+			n++;
+		}
+		g_free(word);
+	}
+	if (n > 0 && mode)
+		gtk_combo_box_set_active_id(GTK_COMBO_BOX(pw.mode), mode);
+	gtk_widget_set_sensitive(pw.mode, n > 0);
+	set_sub(pw.mode_sub, n > 0 ? power_mode_note(mode) :
+		"This computer does not let the system change its power use.");
+	pw.filling = FALSE;
+	g_free(padded);
+	g_free(mode);
+	g_free(modes);
+}
+
+static void
+power_mode_read(void)
+{
+	run_job(ARGV(POWER_MODE), NULL, power_mode_read_done, NULL);
+}
+
+static void
+power_mode_set_done(gboolean ok, const char *out, const char *err, gpointer data)
+{
+	if (!ok)
+		message(GTK_MESSAGE_ERROR, "Could not change the power mode",
+			*err ? err : "This account may not change it.");
+	power_mode_read();
+}
+
+static void
+on_power_mode(GtkComboBox *c, gpointer data)
+{
+	const char *id = gtk_combo_box_get_active_id(c);
+
+	if (pw.filling || !id)
+		return;
+	set_sub(pw.mode_sub, power_mode_note(id));
+	run_job(ARGV(POWER_MODE, "set", id), NULL, power_mode_set_done, NULL);
+}
+
 static GtkWidget *
 build_power(void)
 {
-	GtkWidget *page = page_new("Power", NULL), *list, *b;
+	GtkWidget *page = page_new("Power", NULL), *list, *b, *box;
+	Battery bat;
+
+	battery_read(&bat);
+	if (bat.n > 0) {
+		list = section("Battery");
+		box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+		pw.level = gtk_level_bar_new_for_interval(0, 100);
+		gtk_level_bar_set_mode(GTK_LEVEL_BAR(pw.level), GTK_LEVEL_BAR_MODE_CONTINUOUS);
+		/* GTK's own offsets ("low", "high", "full") colour the bar */
+		gtk_level_bar_add_offset_value(GTK_LEVEL_BAR(pw.level), GTK_LEVEL_BAR_OFFSET_LOW, 10);
+		gtk_level_bar_add_offset_value(GTK_LEVEL_BAR(pw.level), GTK_LEVEL_BAR_OFFSET_HIGH, 30);
+		gtk_level_bar_add_offset_value(GTK_LEVEL_BAR(pw.level), GTK_LEVEL_BAR_OFFSET_FULL, 100);
+		gtk_widget_set_size_request(pw.level, 180, -1);
+		gtk_widget_set_valign(pw.level, GTK_ALIGN_CENTER);
+		pw.percent = gtk_label_new("");
+		gtk_label_set_width_chars(GTK_LABEL(pw.percent), 4);
+		gtk_label_set_xalign(GTK_LABEL(pw.percent), 1);
+		gtk_box_pack_start(GTK_BOX(box), pw.level, FALSE, FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(box), pw.percent, FALSE, FALSE, 0);
+		add_row(list, "Battery level", "", box, &pw.status);
+
+		pw.health = label_new("", "hx-dim");
+		pw.health_row = add_row(list, "Battery health", NULL, pw.health, NULL);
+		gtk_widget_set_no_show_all(pw.health_row, TRUE);
+		battery_refresh(NULL);
+		pw.timer = g_timeout_add_seconds(10, battery_refresh, NULL);
+	}
+
+	list = section("Power mode");
+	pw.mode = gtk_combo_box_text_new();
+	gtk_widget_set_sensitive(pw.mode, FALSE);
+	g_signal_connect(pw.mode, "changed", G_CALLBACK(on_power_mode), NULL);
+	add_row(list, "Power mode", "", pw.mode, &pw.mode_sub);
+	power_mode_read();
 
 	list = section("Screen");
 	add_row(list, "Turn off the screen when not used for",
@@ -4446,7 +4738,7 @@ static const struct {
 	{ "mouse", "Mouse & touchpad", "input-mouse-symbolic", build_mouse, NULL },
 	{ "serial", "Serial ports", "utilities-terminal-symbolic", build_serial, serial_shown },
 	{ "time", "Date & time", "preferences-system-time-symbolic", build_time, time_shown },
-	{ "power", "Power", "system-shutdown-symbolic", build_power, NULL },
+	{ "power", "Power", "system-shutdown-symbolic", build_power, power_shown },
 	{ "account", "Account", "avatar-default-symbolic", build_account, NULL },
 	{ "services", "Services", "emblem-system-symbolic", build_services, services_refresh },
 	{ "about", "About", "help-about-symbolic", build_about, about_refresh },

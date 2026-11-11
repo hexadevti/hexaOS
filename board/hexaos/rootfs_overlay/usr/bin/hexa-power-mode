@@ -1,0 +1,127 @@
+#!/bin/bash
+# hexa-power-mode: the power mode (Power saver, Balanced, Best performance),
+# for the taskbar battery menu and Settings > Power.
+#
+#   hexa-power-mode               "mode CURRENT", then "modes MODE..." with the
+#                                 modes this computer can use (nothing after
+#                                 "modes" when it has no power control)
+#   hexa-power-mode set MODE      saver|balanced|performance, kept for the next
+#                                 start. Runs itself as root through sudo, with
+#                                 no password (/etc/sudoers.d/power)
+#   hexa-power-mode restore       the saved mode, at start (S13powermode)
+#
+# A mode sets the firmware's platform profile when there is one
+# (/sys/firmware/acpi/platform_profile: fans and power limits) and the CPU
+# frequency policy: governor and, with intel_pstate or amd-pstate, the energy
+# preference. The taskbar (Weston desktop-shell) decides which modes exist
+# with the same rules: keep them in step.
+
+SAVED=/etc/hexaos/power-mode
+PP=/sys/firmware/acpi/platform_profile
+CPUFREQ=/sys/devices/system/cpu/cpu0/cpufreq
+
+die() { echo "$*" >&2; exit 1; }
+
+governors() { cat "$CPUFREQ/scaling_available_governors" 2>/dev/null; }
+has_governor() { [[ " $(governors) " == *" $1 "* ]]; }
+has_epp() { [ -e "$CPUFREQ/energy_performance_preference" ]; }
+
+# The first governor of the list that the CPU has
+first_governor() {
+    local g
+    for g in "$@"; do has_governor "$g" && { echo "$g"; return; }; done
+}
+
+modes() {
+    local m=()
+    if [ -e "$PP" ] || has_epp; then
+        m=(saver balanced performance)
+    else
+        has_governor powersave && m+=(saver)
+        [ -n "$(first_governor schedutil ondemand conservative)" ] && m+=(balanced)
+        has_governor performance && m+=(performance)
+    fi
+    echo "${m[*]}"
+}
+
+current() {
+    local m
+    m=$(cat "$SAVED" 2>/dev/null)
+    case "$m" in saver|balanced|performance) echo "$m" ;; *) echo balanced ;; esac
+}
+
+# Writes VALUE to each of the files (one per CPU), ignoring the refused ones
+write_all() {
+    local value=$1 f
+    shift
+    for f in "$@"; do
+        [ -w "$f" ] && echo "$value" > "$f" 2>/dev/null
+    done
+    return 0
+}
+
+# The first of the profiles that the firmware offers
+pick_profile() {
+    local choices p
+    choices=" $(cat "${PP}_choices" 2>/dev/null) "
+    for p in "$@"; do
+        [[ $choices == *" $p "* ]] && { echo "$p"; return; }
+    done
+}
+
+apply() {
+    local mode=$1 profile gov epp
+    shopt -s nullglob
+    local govs=(/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor)
+    local epps=(/sys/devices/system/cpu/cpu[0-9]*/cpufreq/energy_performance_preference)
+
+    case "$mode" in
+        saver)
+            profile=$(pick_profile low-power quiet cool balanced)
+            gov=powersave epp=power ;;
+        balanced)
+            profile=$(pick_profile balanced)
+            if has_epp; then
+                gov=powersave epp=balance_performance
+            else
+                gov=$(first_governor schedutil ondemand conservative)
+            fi ;;
+        performance)
+            profile=$(pick_profile performance balanced-performance balanced)
+            gov=performance epp=performance ;;
+    esac
+
+    [ -n "$profile" ] && [ -w "$PP" ] && echo "$profile" > "$PP" 2>/dev/null
+    # intel_pstate refuses an energy preference other than "performance"
+    # under the performance governor: change the governor first
+    [ -n "$gov" ] && has_governor "$gov" && write_all "$gov" "${govs[@]}"
+    [ -n "$epp" ] && [ "$gov" != performance ] && write_all "$epp" "${epps[@]}"
+    return 0
+}
+
+case "${1:-}" in
+"")
+    echo "mode $(current)"
+    echo "modes $(modes)"
+    ;;
+set)
+    mode=${2:-}
+    case "$mode" in saver|balanced|performance) ;; *) die "Unknown power mode: $mode" ;; esac
+    [[ " $(modes) " == *" $mode "* ]] || die "This computer has no \"$mode\" power mode."
+    if [ "$(id -u)" != 0 ]; then
+        exec sudo -n /usr/bin/hexa-power-mode set "$mode"
+    fi
+    apply "$mode"
+    mkdir -p "$(dirname "$SAVED")"
+    echo "$mode" > "$SAVED"
+    ;;
+restore)
+    [ "$(id -u)" = 0 ] || die "hexa-power-mode restore must run as root"
+    [ -f "$SAVED" ] || exit 0
+    mode=$(current)
+    [[ " $(modes) " == *" $mode "* ]] && apply "$mode"
+    ;;
+*)
+    die "Usage: hexa-power-mode [set saver|balanced|performance | restore]"
+    ;;
+esac
